@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JobSeek Auto</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="logo">JS</div>
+      <nav>
+        <button class="nav-item" data-view="home">Home</button>
+        <button class="nav-item active" data-view="jobs">Jobs</button>
+        <button class="nav-item" data-view="runs">Runs</button>
+        <button class="nav-item" data-view="settings">Settings</button>
+      </nav>
+    </aside>
+
+    <main class="content">
+      <header class="topbar">
+        <div class="brand">JobSeek Auto</div>
+        <div class="topbar-actions">
+          <button id="find-jobs-btn" class="primary-btn" type="button">Find Jobs</button>
+          <span id="run-status" class="muted">Ready</span>
+        </div>
+      </header>
+
+      <section id="home-view" class="view-section">
+        <section class="search-section">
+          <div class="search-label">
+            <span>Search collected jobs</span>
+          </div>
+          <form id="home-search-form" class="search-bar">
+            <input id="home-search-input" type="search" placeholder="Search title, company, location..." autocomplete="off">
+            <button type="submit">Search</button>
+          </form>
+          <p class="muted home-hint">Open the <strong>Jobs</strong> tab to browse and filter your collected positions.</p>
+        </section>
+
+        <section class="panels home-panels">
+          <div class="panel recent-runs">
+            <h2>Recent Automation Runs</h2>
+            <div id="runs-list" class="runs-list"></div>
+          </div>
+        </section>
+      </section>
+
+      <section id="jobs-view" class="view-section hidden">
+        <div class="jobs-layout">
+          <aside class="jobs-sidebar">
+            <div class="entity-toggle">
+              <button type="button" class="toggle-btn active" data-entity="position">Position</button>
+              <button type="button" class="toggle-btn" data-entity="companies">Companies</button>
+            </div>
+
+            <div class="sidebar-block">
+              <label class="sidebar-label" for="jobs-portal-filter">Portal</label>
+              <select id="jobs-portal-filter">
+                <option value="">All portals</option>
+                <option value="hiringcafe">HiringCafe</option>
+                <option value="builtin">Built In</option>
+                <option value="jobright">Jobright</option>
+                <option value="glassdoor">Glassdoor</option>
+              </select>
+            </div>
+          </aside>
+
+          <div class="jobs-main">
+            <div class="jobs-toolbar">
+              <div class="result-chips" id="decision-chips">
+                <button type="button" class="chip active" data-decision="all">All Results</button>
+                <button type="button" class="chip" data-decision="eligible">Enable</button>
+                <button type="button" class="chip" data-decision="needs_review">Need Review</button>
+                <button type="button" class="chip" data-decision="rejected">Reject</button>
+              </div>
+
+              <form id="jobs-search-form" class="search-bar jobs-search-bar">
+                <input id="jobs-search-input" type="search" placeholder="Search title, company, location..." autocomplete="off">
+                <button type="submit">Search</button>
+              </form>
+            </div>
+
+            <div class="jobs-content">
+              <div class="panel jobs-panel">
+                <div class="jobs-panel-header">
+                  <h2 id="jobs-list-title">Positions</h2>
+                  <span id="jobs-count" class="muted"></span>
+                </div>
+                <div id="jobs-list" class="jobs-list"></div>
+                <div id="pagination" class="pagination"></div>
+              </div>
+
+              <div class="panel detail-panel">
+                <h2>Job Detail</h2>
+                <div id="job-detail" class="job-detail empty">Select a job to view evidence and links.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="settings-view" class="view-section hidden">
+        <div class="panel settings-panel">
+          <h2>Portal Login Credentials</h2>
+          <p class="muted settings-note">
+            Credentials are saved in your browser (localStorage) on this device. When you click
+            <strong>Find Jobs</strong>, they are sent to the automation runner to log in and search.
+          </p>
+          <div id="portal-credentials" class="credentials-grid"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="find-jobs-modal" class="modal hidden">
+    <div class="modal-content">
+      <h2>Find Jobs</h2>
+      <p class="muted">Select portals to search. Saved credentials from Settings are used to log in.</p>
+      <p id="find-jobs-hint" class="find-jobs-hint hidden"></p>
+      <div id="find-portals" class="portal-checkboxes"></div>
+      <div class="modal-actions">
+        <button type="button" id="go-settings-btn" class="secondary-btn">Open Settings</button>
+        <button type="button" id="cancel-find-jobs" class="secondary-btn">Cancel</button>
+        <button type="button" id="confirm-find-jobs" class="primary-btn">Start Search</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/credentials-store.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
