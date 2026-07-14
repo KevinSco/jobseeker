@@ -40,9 +40,13 @@ class RawJob(BaseModel):
     job_card_url: str | None = None
     portal_job_url: str | None = None
     apply_url: str | None = None
+    industry: str | None = None
+    work_type: str | None = None
     raw_html: str | None = None
     raw_text: str | None = None
     description_text: str | None = None
+    forced_decision: Decision | None = None
+    forced_decision_reason: str | None = None
     collected_at: datetime = Field(default_factory=datetime.utcnow)
 
 

@@ -10,7 +10,7 @@ from sqlalchemy import Select, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from job_automation.models.domain import Decision, Evidence, NormalizedJob, PortalRunStatus
-from job_automation.storage.models import JobRow, JobSourceRow, PortalRunRow
+from job_automation.storage.models import BannedCompanyRow, JobRow, JobSourceRow, PortalRunRow
 
 
 def _evidence_to_json(evidence: list[Evidence]) -> str:
@@ -290,3 +290,48 @@ class PortalRunRepository:
                 seen.add(portal)
                 portals.append(portal)
         return portals
+
+
+def _normalize_company_name(name: str) -> str:
+    import re
+
+    return re.sub(r"\s+", " ", name).strip().lower()
+
+
+class BannedCompanyRepository:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def is_banned(self, company_name: str | None) -> bool:
+        if not company_name or not company_name.strip():
+            return False
+        normalized = _normalize_company_name(company_name)
+        result = await self.session.execute(
+            select(BannedCompanyRow)
+            .where(BannedCompanyRow.company_name_normalized == normalized)
+            .limit(1)
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def list_normalized_names(self) -> set[str]:
+        result = await self.session.execute(select(BannedCompanyRow.company_name_normalized))
+        return {row for row in result.scalars().all()}
+
+    async def add(self, company_name: str, reason: str | None = None) -> BannedCompanyRow:
+        normalized = _normalize_company_name(company_name)
+        existing = await self.session.execute(
+            select(BannedCompanyRow)
+            .where(BannedCompanyRow.company_name_normalized == normalized)
+            .limit(1)
+        )
+        row = existing.scalar_one_or_none()
+        if row:
+            return row
+        row = BannedCompanyRow(
+            company_name=company_name.strip(),
+            company_name_normalized=normalized,
+            reason=reason,
+        )
+        self.session.add(row)
+        await self.session.flush()
+        return row
