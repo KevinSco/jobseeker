@@ -30,11 +30,13 @@ class KeywordsConfig(BaseModel):
 
 class SearchConfig(BaseModel):
     search_queries: list[str] = Field(default_factory=list)
+    portal_search_queries: dict[str, list[str]] = Field(default_factory=dict)
     target_roles: list[str] = Field(default_factory=list)
     target_skills: list[str] = Field(default_factory=list)
     excluded_roles: list[str] = Field(default_factory=list)
     experience_levels: list[str] = Field(default_factory=list)
     commitment_types: list[str] = Field(default_factory=list)
+    banned_industry_terms: list[str] = Field(default_factory=list)
     location: str = "United States"
     salary: SalaryConfig = Field(default_factory=SalaryConfig)
     keywords: KeywordsConfig = Field(default_factory=KeywordsConfig)
@@ -44,6 +46,12 @@ class SearchConfig(BaseModel):
     max_pages_per_query: int = 3
     portal_concurrency: int = 2
     headless: bool = True
+
+    def queries_for_portal(self, portal: str) -> list[str]:
+        portal_queries = self.portal_search_queries.get(portal)
+        if portal_queries:
+            return list(portal_queries)
+        return list(self.search_queries)
 
 
 def load_rules(path: Path | None = None) -> SearchConfig:

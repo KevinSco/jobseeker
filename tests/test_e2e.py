@@ -181,6 +181,25 @@ def test_health_api(seeded_client: TestClient):
     assert response.json()["status"] == "ok"
 
 
+def test_delete_session_api(seeded_client: TestClient, tmp_path, monkeypatch):
+    from job_automation import paths
+
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    session_file = sessions_dir / "builtin.json"
+    session_file.write_text('{"cookies": []}', encoding="utf-8")
+    monkeypatch.setattr(paths, "SESSIONS_DIR", sessions_dir)
+
+    missing = seeded_client.delete("/api/credentials/sessions/hiringcafe")
+    assert missing.status_code == 200
+    assert missing.json()["session_deleted"] is False
+
+    response = seeded_client.delete("/api/credentials/sessions/builtin")
+    assert response.status_code == 200
+    assert response.json()["session_deleted"] is True
+    assert not session_file.exists()
+
+
 def test_e2e_runs_api(seeded_client: TestClient):
     response = seeded_client.get("/api/runs")
     assert response.status_code == 200

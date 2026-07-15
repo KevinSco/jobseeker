@@ -19,7 +19,7 @@ from job_automation.portals.base import BasePortalWorker, LoginRequiredError
 from job_automation.rules.rule_engine import RuleEngine
 from job_automation.storage.database import init_db, session_scope
 from job_automation.storage.models import JobRow
-from job_automation.storage.repositories import JobRepository, PortalRunRepository
+from job_automation.storage.repositories import BannedCompanyRepository, JobRepository, PortalRunRepository
 
 logger = get_logger(__name__)
 
@@ -82,6 +82,11 @@ class Orchestrator:
             result = await session.execute(select(JobRow))
             return list(result.scalars().all())
 
+    async def _load_banned_companies(self) -> set[str]:
+        async with session_scope() as session:
+            repo = BannedCompanyRepository(session)
+            return await repo.list_normalized_names()
+
     async def _run_portal(
         self,
         portal: str,
@@ -95,22 +100,42 @@ class Orchestrator:
 
         try:
             async with self.browser_manager.portal_slot():
+                banned_companies = await self._load_banned_companies()
                 worker_cls = get_worker_class(portal)
-                worker = worker_cls(
-                    self.config,
-                    self.browser_manager,
-                    self.session_manager,
-                    early_duplicate_check=dedupe_engine.is_early_duplicate,
-                )
+                worker_kwargs = {
+                    "early_duplicate_check": dedupe_engine.is_early_duplicate,
+                }
+                if portal == "builtin":
+                    worker = worker_cls(
+                        self.config,
+                        self.browser_manager,
+                        self.session_manager,
+                        banned_companies=banned_companies,
+                        **worker_kwargs,
+                    )
+                else:
+                    worker = worker_cls(
+                        self.config,
+                        self.browser_manager,
+                        self.session_manager,
+                        **worker_kwargs,
+                    )
                 raw_jobs = await worker.run()
                 stats["found"] = len(raw_jobs)
 
                 for raw in raw_jobs:
                     try:
                         normalized = transform_raw_job(raw, self.config)
+                        if raw.work_type and not normalized.remote_policy:
+                            if "fully_remote" in raw.work_type:
+                                normalized.remote_policy = "fully_remote_us"
                         normalized = dedupe_engine.mark_duplicates(normalized)
                         if not normalized.is_duplicate:
-                            normalized = rule_engine.decide(normalized)
+                            if raw.forced_decision:
+                                normalized.decision = raw.forced_decision
+                                normalized.decision_reason = raw.forced_decision_reason
+                            else:
+                                normalized = rule_engine.decide(normalized)
                         async with session_scope() as session:
                             job_repo = JobRepository(session)
                             row = await job_repo.upsert_job(normalized)

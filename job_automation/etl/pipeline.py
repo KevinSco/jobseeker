@@ -74,7 +74,7 @@ def transform_raw_job(raw: RawJob, config: SearchConfig) -> NormalizedJob:
         remote_policy=str(remote.value) if remote.value is not None else None,
         commitment=str(commitment.value) if commitment.value else None,
         experience_level=str(experience.value) if experience.value else None,
-        industry="government" if government.value else None,
+        industry=normalize_text(raw.industry) or ("government" if government.value else None),
         salary_text=salary.salary_text,
         salary_min_annual=salary.min_annual,
         salary_max_annual=salary.max_annual,
@@ -91,6 +91,8 @@ def transform_raw_job(raw: RawJob, config: SearchConfig) -> NormalizedJob:
         description_text=description or None,
         raw_html=raw.raw_html,
         evidence=evidence,
+        decision=raw.forced_decision,
+        decision_reason=raw.forced_decision_reason,
     )
 
 

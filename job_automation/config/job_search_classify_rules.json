@@ -12,6 +12,40 @@
     "Data Engineer Python",
     "PHP Developer"
   ],
+  "portal_search_queries": {
+    "builtin": [
+      "Python",
+      "Data",
+      "AI",
+      "software",
+      "java",
+      ".net",
+      "c#",
+      "react",
+      "JavaScript",
+      "TypeScript",
+      "frontend",
+      "backend",
+      "full-stack"
+    ]
+  },
+  "banned_industry_terms": [
+    "security",
+    "cybersecurity",
+    "cyber security",
+    "clearance",
+    "defense",
+    "defence",
+    "military",
+    "govtech",
+    "government",
+    "federal",
+    "intelligence",
+    "surveillance",
+    "weapons",
+    "aerospace & defense",
+    "national security"
+  ],
   "target_roles": [
     "Software Engineer",
     "Full Stack Engineer",

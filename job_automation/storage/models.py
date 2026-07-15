@@ -81,3 +81,13 @@ class PortalRunRow(Base):
     jobs_saved: Mapped[int] = mapped_column(Integer, default=0)
     jobs_failed: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text)
+
+
+class BannedCompanyRow(Base):
+    __tablename__ = "banned_companies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    company_name: Mapped[str] = mapped_column(String(512), unique=True, index=True)
+    company_name_normalized: Mapped[str] = mapped_column(String(512), unique=True, index=True)
+    reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

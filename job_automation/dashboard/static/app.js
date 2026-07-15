@@ -358,7 +358,7 @@ function renderCredentialCard(portalInfo) {
   const configured = portalInfo.configured
     ? `Saved in browser as ${escapeHtml(portalInfo.username || "")}`
     : "Not saved in browser";
-  const session = portalInfo.has_session ? " · Login session saved" : "";
+  const session = portalInfo.has_session ? " · Login session saved" : " · No login session";
 
   return `
     <div class="credential-card" data-portal="${portalInfo.portal}">
@@ -402,7 +402,12 @@ function renderCredentialCard(portalInfo) {
         }
         <div class="credential-actions">
           <button type="submit" class="primary-btn">Save to Browser</button>
-          ${portalInfo.configured ? `<button type="button" class="secondary-btn delete-cred">Remove</button>` : ""}
+          <button type="button" class="secondary-btn delete-cred" ${portalInfo.configured ? "" : "disabled"}>
+            Delete Credentials
+          </button>
+          <button type="button" class="secondary-btn delete-session" ${portalInfo.has_session ? "" : "disabled"}>
+            Clear Login Session
+          </button>
         </div>
       </form>
     </div>
@@ -425,11 +430,45 @@ function bindCredentialForms() {
   });
 
   document.querySelectorAll(".delete-cred").forEach((btn) => {
-    btn.addEventListener("click", () => {
+    btn.addEventListener("click", async () => {
       const portal = btn.closest(".credential-card").dataset.portal;
-      deletePortalCredential(portal);
-      showCredentialToast(`${PORTAL_LABELS[portal] || portal} credentials removed from browser.`);
-      loadCredentials();
+      const label = PORTAL_LABELS[portal] || portal;
+      if (!confirm(`Delete saved credentials for ${label}?`)) {
+        return;
+      }
+      try {
+        deletePortalCredential(portal);
+        const response = await fetch(`/api/credentials/${portal}`, { method: "DELETE" });
+        if (!response.ok && response.status !== 404) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || "Failed to delete server credentials");
+        }
+        showCredentialToast(`${label} credentials deleted.`);
+        await loadCredentials();
+      } catch (error) {
+        alert(error.message || "Failed to delete credentials");
+      }
+    });
+  });
+
+  document.querySelectorAll(".delete-session").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const portal = btn.closest(".credential-card").dataset.portal;
+      const label = PORTAL_LABELS[portal] || portal;
+      if (!confirm(`Clear saved login session for ${label}? You will need to log in again next search.`)) {
+        return;
+      }
+      try {
+        const response = await fetch(`/api/credentials/sessions/${portal}`, { method: "DELETE" });
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || "Failed to clear login session");
+        }
+        showCredentialToast(`${label} login session cleared.`);
+        await loadCredentials();
+      } catch (error) {
+        alert(error.message || "Failed to clear login session");
+      }
     });
   });
 }

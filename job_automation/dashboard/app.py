@@ -107,6 +107,19 @@ def create_app() -> FastAPI:
         CredentialStore().delete(portal)
         return {"portal": portal, "deleted": True}
 
+    @app.delete("/api/credentials/sessions/{portal}")
+    async def delete_session(portal: str) -> dict[str, Any]:
+        if portal not in SUPPORTED_PORTALS:
+            raise HTTPException(status_code=400, detail=f"Unsupported portal: {portal}")
+        from job_automation.paths import SESSIONS_DIR
+
+        session_path = SESSIONS_DIR / f"{portal}.json"
+        deleted = False
+        if session_path.exists():
+            session_path.unlink()
+            deleted = True
+        return {"portal": portal, "session_deleted": deleted}
+
     @app.get("/api/search/status")
     async def search_status() -> dict[str, Any]:
         return get_search_status()
