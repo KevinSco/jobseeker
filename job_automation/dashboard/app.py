@@ -174,6 +174,13 @@ def create_app() -> FastAPI:
             jobs = [_serialize_job(row) for row in rows]
         return {"jobs": jobs, "total": total, "page": page, "page_size": page_size}
 
+    @app.post("/api/jobs/clear")
+    async def clear_jobs() -> dict[str, Any]:
+        async with session_scope() as session:
+            repo = JobRepository(session)
+            result = await repo.clear_all_jobs()
+        return {"cleared": True, **result}
+
     @app.get("/api/jobs/{job_id}")
     async def get_job(job_id: int) -> dict[str, Any]:
         async with session_scope() as session:
@@ -213,6 +220,45 @@ def create_app() -> FastAPI:
                 }
                 for run in runs
             ]
+        }
+
+    @app.get("/api/logs")
+    async def worker_logs(
+        source: str = Query(default="automation"),
+        lines: int = Query(default=300, ge=20, le=2000),
+    ) -> dict[str, Any]:
+        from job_automation.dashboard.search_service import LOG_PATH
+        from job_automation.paths import LOGS_DIR
+
+        sources = {
+            "automation": LOGS_DIR / "automation.log",
+            "search": LOG_PATH,
+        }
+        if source not in {"automation", "search", "all"}:
+            raise HTTPException(status_code=400, detail="source must be automation, search, or all")
+
+        selected = list(sources.items()) if source == "all" else [(source, sources[source])]
+        chunks: list[str] = []
+        files: list[dict[str, Any]] = []
+        for name, path in selected:
+            exists = path.exists()
+            files.append({"name": name, "path": str(path), "exists": exists})
+            if not exists:
+                chunks.append(f"===== {name} =====\n(no log file yet)\n")
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                chunks.append(f"===== {name} =====\n(error reading log: {exc})\n")
+                continue
+            tail = "\n".join(text.splitlines()[-lines:])
+            chunks.append(f"===== {name} =====\n{tail}\n")
+
+        return {
+            "source": source,
+            "lines": lines,
+            "files": files,
+            "content": "\n".join(chunks).rstrip() + "\n",
         }
 
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")

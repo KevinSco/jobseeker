@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import urljoin
+from urllib.parse import quote_plus, urljoin
 
 from playwright.async_api import Locator, Page
 
@@ -24,6 +24,7 @@ class BuiltInWorker(BasePortalWorker):
     def __init__(self, *args, banned_companies: set[str] | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.banned_companies = {c.lower().strip() for c in (banned_companies or set()) if c}
+        self._current_list_url: str | None = None
 
     async def is_logged_in(self, page: Page) -> bool:
         content = (await page.content()).lower()
@@ -37,6 +38,7 @@ class BuiltInWorker(BasePortalWorker):
             raise LoginRequiredError(f"{self.portal_name} requires manual login")
 
         collected: list[RawJob] = []
+        seen_urls: set[str] = set()
         queries = self.config.queries_for_portal(self.portal_name)
         try:
             for query in queries:
@@ -46,9 +48,17 @@ class BuiltInWorker(BasePortalWorker):
                     portal=self.portal_name,
                     action="search_query",
                 )
-                await self._open_jobs_board(page)
-                await self._apply_default_filters(page)
-                await self._submit_keyword_search(page, query)
+                try:
+                    await self._open_filtered_search(page, query)
+                except Exception as exc:
+                    log_event(
+                        logger,
+                        f"Search setup failed for '{query}': {exc}",
+                        portal=self.portal_name,
+                        action="search_error",
+                        level=40,
+                    )
+                    continue
 
                 for page_num in range(self.config.max_pages_per_query):
                     cards = await self._job_cards(page)
@@ -75,17 +85,39 @@ class BuiltInWorker(BasePortalWorker):
                             break
                         card = cards[index]
                         try:
+                            href = await self._card_job_href(card)
+                            if not href:
+                                continue
+                            detail_url = href if href.startswith("http") else urljoin(BUILTIN_ORIGIN, href)
+                            source_job_id = extract_job_id_from_url(detail_url)
+                            url_key = detail_url.rstrip("/")
+
+                            # Duplicate filter: skip before heart/detail/ETL — just move to next card.
+                            # Keep mark_duplicates rule in orchestrator for near-duplicates that still open.
+                            if url_key in seen_urls or (
+                                self.early_duplicate_check
+                                and self.early_duplicate_check(source_job_id, detail_url)
+                            ):
+                                log_event(
+                                    logger,
+                                    f"Skipping duplicate — move to next job: {detail_url}",
+                                    portal=self.portal_name,
+                                    job_id=source_job_id or "-",
+                                    action="skip_duplicate",
+                                )
+                                continue
+
+                            seen_urls.add(url_key)
+                            # One job at a time: expand/identify → save → then next dropdown.
                             raw = await self._process_card(page, card, query)
                             if raw is None:
                                 continue
-                            if self.early_duplicate_check and self.early_duplicate_check(
-                                raw.source_job_id, raw.portal_job_url
-                            ):
-                                continue
                             collected.append(raw)
+                            await self._emit_job(raw)
                             log_event(
                                 logger,
-                                f"Collected: {raw.job_card_title} ({raw.forced_decision or 'pending'})",
+                                f"Identified and saved — move to next job: {raw.job_card_title} "
+                                f"({raw.forced_decision or 'pending'})",
                                 portal=self.portal_name,
                                 job_id=raw.source_job_id or "-",
                                 action="extract",
@@ -98,14 +130,7 @@ class BuiltInWorker(BasePortalWorker):
                                 action="extract_error",
                                 level=40,
                             )
-                            try:
-                                if "jobs" not in page.url:
-                                    await page.go_back(wait_until="domcontentloaded", timeout=30000)
-                                    await page.wait_for_timeout(1500)
-                            except Exception:
-                                await self._open_jobs_board(page)
-                                await self._apply_default_filters(page)
-                                await self._submit_keyword_search(page, query)
+                            await self._return_to_list(page, query)
 
                     if not await self._go_next_page(page):
                         break
@@ -139,50 +164,79 @@ class BuiltInWorker(BasePortalWorker):
         return urljoin(BUILTIN_ORIGIN, href)
 
     async def extract_description(self, page: Page) -> str | None:
-        for selector in [
-            "[data-id='job-description']",
-            ".job-description",
-            "#job-description",
-            "section.description",
-            "article",
-            "main",
-        ]:
-            text = await safe_inner_text(page, selector)
-            if text and len(text) > 120:
-                return text
-        return await safe_inner_text(page, "body")
+        # Built In job body is always in a div whose id starts with "job-post-body-".
+        text = await safe_inner_text(page, "div[id^='job-post-body']")
+        if text:
+            return text
+        return None
 
     async def _open_jobs_board(self, page: Page) -> None:
         await page.goto(self.base_url, wait_until="domcontentloaded", timeout=90000)
         await page.wait_for_timeout(2000)
 
+    def _search_url(self, query: str) -> str:
+        # Keyword only via URL; job type / location / posted date are applied in order after.
+        return f"{self.base_url}?search={quote_plus(query)}"
+
+    async def _open_filtered_search(self, page: Page, query: str) -> None:
+        url = self._search_url(query)
+        log_event(logger, f"Opening search URL: {url}", portal=self.portal_name, action="search_query")
+        await page.goto(url, wait_until="domcontentloaded", timeout=90000)
+        await page.wait_for_timeout(2500)
+        self._current_list_url = page.url
+        await self._apply_default_filters(page)
+        self._current_list_url = page.url
+        await page.wait_for_timeout(1000)
+
+    async def _return_to_list(self, page: Page, query: str) -> None:
+        target = self._current_list_url or self._search_url(query)
+        try:
+            await page.goto(target, wait_until="domcontentloaded", timeout=90000)
+            await page.wait_for_timeout(1500)
+        except Exception:
+            await self._open_filtered_search(page, query)
+
+    async def _safe_click(self, locator: Locator, *, timeout: int = 5000) -> bool:
+        try:
+            if await locator.count() == 0:
+                return False
+            await locator.scroll_into_view_if_needed(timeout=timeout)
+            await locator.click(timeout=timeout, force=False)
+            return True
+        except Exception:
+            try:
+                # Sticky Built In header often intercepts normal clicks.
+                await locator.click(timeout=timeout, force=True)
+                return True
+            except Exception:
+                return False
+
     async def _apply_default_filters(self, page: Page) -> None:
-        """Default: USA + Fully Remote + Past 24 hours."""
-        await self._set_location_usa(page)
+        """Filter order after keyword: job type → location → posted date."""
         await self._set_fully_remote(page)
+        await self._set_location_usa(page)
         await self._set_past_24_hours(page)
-        await page.wait_for_timeout(1200)
+        await page.wait_for_timeout(800)
 
     async def _set_location_usa(self, page: Page) -> None:
         locator = page.locator("#locationDropdownInput-JobBoard").first
         if await locator.count() == 0:
             return
         try:
-            await locator.click(timeout=5000)
+            await self._safe_click(locator)
             await locator.fill("")
-            await locator.type("USA", delay=80)
-            await page.wait_for_timeout(800)
+            await locator.type("USA", delay=60)
+            await page.wait_for_timeout(700)
             option = page.locator(
                 "[role='option']:has-text('USA'), "
                 "li:has-text('USA'), "
-                "button:has-text('USA'), "
-                "div:has-text('United States')"
+                "button:has-text('USA')"
             ).first
             if await option.count():
-                await option.click(timeout=3000)
+                await self._safe_click(option, timeout=3000)
             else:
                 await page.keyboard.press("Enter")
-            await page.wait_for_timeout(600)
+            await page.wait_for_timeout(500)
         except Exception as exc:
             log_event(logger, f"Location filter skipped: {exc}", portal=self.portal_name, action="filter", level=30)
 
@@ -191,7 +245,8 @@ class BuiltInWorker(BasePortalWorker):
         if await button.count() == 0:
             return
         try:
-            await button.click(timeout=5000)
+            if not await self._safe_click(button):
+                raise RuntimeError("remote dropdown not clickable")
             await page.wait_for_timeout(400)
             option = page.locator(
                 "button:has-text('Fully Remote'), "
@@ -200,8 +255,8 @@ class BuiltInWorker(BasePortalWorker):
                 "li:has-text('Fully Remote')"
             ).first
             if await option.count():
-                await option.click(timeout=5000)
-            await page.wait_for_timeout(600)
+                await self._safe_click(option)
+            await page.wait_for_timeout(500)
         except Exception as exc:
             log_event(logger, f"Remote filter skipped: {exc}", portal=self.portal_name, action="filter", level=30)
 
@@ -210,7 +265,18 @@ class BuiltInWorker(BasePortalWorker):
         if await button.count() == 0:
             return
         try:
-            await button.click(timeout=5000)
+            # Re-clicking when already selected resets the filter on Built In.
+            label = normalize_whitespace(await button.inner_text()) or ""
+            if "past 24 hour" in label.lower():
+                log_event(
+                    logger,
+                    "Posted date already Past 24 hours — skip click",
+                    portal=self.portal_name,
+                    action="filter",
+                )
+                return
+            if not await self._safe_click(button):
+                raise RuntimeError("posted-date dropdown not clickable")
             await page.wait_for_timeout(400)
             option = page.locator(
                 "button:has-text('Past 24 hours'), "
@@ -221,43 +287,14 @@ class BuiltInWorker(BasePortalWorker):
                 "[role='option']:has-text('Past 24 Hours')"
             ).first
             if await option.count():
-                await option.click(timeout=5000)
-            await page.wait_for_timeout(600)
+                await self._safe_click(option)
+            await page.wait_for_timeout(500)
         except Exception as exc:
             log_event(logger, f"Posted-date filter skipped: {exc}", portal=self.portal_name, action="filter", level=30)
 
     async def _submit_keyword_search(self, page: Page, query: str) -> None:
-        # Prefer the main search bar on the jobs board.
-        candidates = [
-            "input[placeholder*='Search' i]",
-            "input[type='search']",
-            "input[name='search']",
-            "#search",
-        ]
-        search = None
-        for selector in candidates:
-            locator = page.locator(selector).first
-            if await locator.count():
-                search = locator
-                break
-        if search is None:
-            # Fallback: querystring navigation with common Built In params.
-            from urllib.parse import quote_plus
-
-            url = (
-                f"{self.base_url}?search={quote_plus(query)}"
-                f"&remote=true&country=USA&daysSinceUpdated=1"
-            )
-            await page.goto(url, wait_until="domcontentloaded", timeout=90000)
-            await page.wait_for_timeout(2000)
-            return
-
-        await search.click(timeout=5000)
-        await search.fill("")
-        await search.press_sequentially(query, delay=120)
-        await page.wait_for_timeout(300)
-        await page.keyboard.press("Enter")
-        await page.wait_for_timeout(2500)
+        """Deprecated path kept for compatibility; URL search is preferred."""
+        await self._open_filtered_search(page, query)
 
     async def _job_cards(self, page: Page) -> list[Locator]:
         # Built In job cards typically have a dropdown button; use that as the card root.
@@ -312,10 +349,9 @@ class BuiltInWorker(BasePortalWorker):
                 forced_decision_reason=ban_reason,
             )
 
-        # Good card: save heart, then open job title (not company).
+        # Good card: save heart, then open detail by URL (avoids sticky-header click bugs).
         await self._click_heart(card)
-        await self._click_job_title(card)
-        await page.wait_for_load_state("domcontentloaded", timeout=60000)
+        await page.goto(detail_url, wait_until="domcontentloaded", timeout=90000)
         await page.wait_for_timeout(1500)
 
         detail = await self._extract_detail(
@@ -350,15 +386,8 @@ class BuiltInWorker(BasePortalWorker):
             description_text=detail.description_text,
         )
 
-        # Return to list for the next card.
-        try:
-            await page.go_back(wait_until="domcontentloaded", timeout=45000)
-            await page.wait_for_timeout(1500)
-        except Exception:
-            await self._open_jobs_board(page)
-            await self._apply_default_filters(page)
-            await self._submit_keyword_search(page, query)
-
+        # Always reload the filtered list URL (do not rely on browser back).
+        await self._return_to_list(page, query)
         return raw
 
     def _card_reject_reason(self, company: str | None, industry: str | None) -> str | None:
@@ -378,7 +407,7 @@ class BuiltInWorker(BasePortalWorker):
             dropdown = card.page.locator("#job-dropdown-button").first
         try:
             if await dropdown.count():
-                await dropdown.click(timeout=4000)
+                await self._safe_click(dropdown, timeout=4000)
                 await card.page.wait_for_timeout(700)
         except Exception:
             pass
@@ -403,12 +432,9 @@ class BuiltInWorker(BasePortalWorker):
             btn = card.locator(selector).first
             if await btn.count() == 0:
                 continue
-            try:
-                await btn.click(timeout=3000)
+            if await self._safe_click(btn, timeout=3000):
                 await card.page.wait_for_timeout(400)
                 return
-            except Exception:
-                continue
 
     async def _click_job_title(self, card: Locator) -> None:
         # Prefer job detail links; avoid company profile links.

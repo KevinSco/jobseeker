@@ -29,7 +29,11 @@ class DeduplicationEngine:
         for row in self.existing_jobs:
             if source_job_id and row.source_job_id == source_job_id:
                 return True
-            if url and row.canonical_url == url:
+            if url and row.canonical_url and row.canonical_url == url:
+                return True
+            if job_url and row.job_url and row.job_url.rstrip("/") == job_url.rstrip("/"):
+                return True
+            if url and row.job_url and canonical_apply_url(row.job_url, row.job_url) == url:
                 return True
         return False
 

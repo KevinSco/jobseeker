@@ -123,6 +123,8 @@ def schedule_search(
         "portals": portals,
         "headful": headful,
         "guest": guest,
+        "found": 0,
+        "saved": 0,
         "started_at": datetime.utcnow().isoformat(),
         "command": " ".join(cmd),
         "log_file": str(LOG_PATH),
@@ -137,6 +139,30 @@ def mark_search_finished(summary: dict | None = None, *, error: str | None = Non
     status["finished_at"] = datetime.utcnow().isoformat()
     if summary is not None:
         status["summary"] = summary
+        status["found"] = summary.get("found", status.get("found", 0))
+        status["saved"] = summary.get("saved", status.get("saved", 0))
     if error:
         status["error"] = error
+    _write_status(status)
+
+
+def update_search_progress(
+    *,
+    found: int | None = None,
+    saved: int | None = None,
+    last_job_title: str | None = None,
+    last_decision: str | None = None,
+) -> None:
+    status = _read_status()
+    if not status.get("running"):
+        return
+    if found is not None:
+        status["found"] = found
+    if saved is not None:
+        status["saved"] = saved
+    if last_job_title is not None:
+        status["last_job_title"] = last_job_title
+    if last_decision is not None:
+        status["last_decision"] = last_decision
+    status["updated_at"] = datetime.utcnow().isoformat()
     _write_status(status)

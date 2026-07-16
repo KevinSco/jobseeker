@@ -14,8 +14,12 @@ let searchPollTimer = null;
 let activeDecision = "all";
 let activeEntity = "position";
 
-const jobsList = document.getElementById("jobs-list");
 const runsList = document.getElementById("runs-list");
+const homeRunsList = document.getElementById("home-runs-list");
+const workerLogs = document.getElementById("worker-logs");
+const logSource = document.getElementById("log-source");
+const logAutoScroll = document.getElementById("log-auto-scroll");
+const jobsList = document.getElementById("jobs-list");
 const jobDetail = document.getElementById("job-detail");
 const pagination = document.getElementById("pagination");
 const jobsSearchForm = document.getElementById("jobs-search-form");
@@ -27,12 +31,16 @@ const jobsCount = document.getElementById("jobs-count");
 const jobsListTitle = document.getElementById("jobs-list-title");
 const runStatus = document.getElementById("run-status");
 const findJobsBtn = document.getElementById("find-jobs-btn");
+const clearJobsBtn = document.getElementById("clear-jobs-btn");
 const findJobsModal = document.getElementById("find-jobs-modal");
 const findPortals = document.getElementById("find-portals");
 const credentialsContainer = document.getElementById("portal-credentials");
 const homeView = document.getElementById("home-view");
 const jobsView = document.getElementById("jobs-view");
+const runsView = document.getElementById("runs-view");
 const settingsView = document.getElementById("settings-view");
+
+let logPollTimer = null;
 
 const DECISION_LABELS = {
   eligible: "Enable",
@@ -97,28 +105,67 @@ function showView(view) {
   });
   homeView.classList.toggle("hidden", view !== "home");
   jobsView.classList.toggle("hidden", view !== "jobs");
+  runsView.classList.toggle("hidden", view !== "runs");
   settingsView.classList.toggle("hidden", view !== "settings");
+
+  if (view === "runs") {
+    startLogPolling();
+  } else {
+    stopLogPolling();
+  }
 }
 
 document.querySelectorAll(".nav-item").forEach((btn) => {
   btn.addEventListener("click", () => {
     const view = btn.dataset.view;
-    if (view === "runs") {
-      showView("home");
-      loadRuns();
-      return;
-    }
-    showView(view === "settings" ? "settings" : view === "jobs" ? "jobs" : "home");
+    showView(view === "settings" ? "settings" : view === "jobs" ? "jobs" : view === "runs" ? "runs" : "home");
     if (view === "settings") loadCredentials();
     if (view === "jobs") loadJobs();
     if (view === "home") loadRuns();
+    if (view === "runs") {
+      loadRuns();
+      loadWorkerLogs();
+    }
   });
+});
+
+document.getElementById("refresh-runs-btn")?.addEventListener("click", () => {
+  loadRuns();
+});
+
+document.getElementById("refresh-logs-btn")?.addEventListener("click", () => {
+  loadWorkerLogs();
+});
+
+logSource?.addEventListener("change", () => {
+  loadWorkerLogs();
 });
 
 findJobsBtn.addEventListener("click", async () => {
   await loadCredentials();
   renderFindPortalsModal();
   findJobsModal.classList.remove("hidden");
+});
+
+clearJobsBtn?.addEventListener("click", async () => {
+  if (!confirm("Delete all collected jobs, sources, and run history from the database?")) {
+    return;
+  }
+  try {
+    const response = await fetch("/api/jobs/clear", { method: "POST" });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || "Failed to clear jobs");
+    }
+    const data = await response.json();
+    selectedJobId = null;
+    jobDetail.innerHTML = `<div class="job-detail empty">Select a job to view evidence and links.</div>`;
+    await loadJobs();
+    await loadRuns();
+    showCredentialToast(`Cleared ${data.jobs_deleted || 0} jobs from database.`);
+  } catch (error) {
+    alert(error.message || "Failed to clear jobs");
+  }
 });
 
 document.getElementById("cancel-find-jobs").addEventListener("click", () => {
@@ -134,20 +181,71 @@ document.getElementById("go-settings-btn").addEventListener("click", () => {
 document.getElementById("confirm-find-jobs").addEventListener("click", startFindJobs);
 
 async function loadRuns() {
-  const response = await fetch("/api/runs?limit=8");
+  const response = await fetch("/api/runs?limit=20");
   const data = await response.json();
-  runsList.innerHTML = data.runs.map(renderRun).join("") || "<div class='muted'>No runs yet.</div>";
+  const html = data.runs.map(renderRun).join("") || "<div class='muted'>No runs yet.</div>";
+  if (runsList) runsList.innerHTML = html;
+  if (homeRunsList) {
+    homeRunsList.innerHTML =
+      data.runs.slice(0, 5).map(renderRun).join("") || "<div class='muted'>No runs yet.</div>";
+  }
 }
 
 function renderRun(run) {
   const when = run.started_at ? new Date(run.started_at).toLocaleString() : "Unknown";
+  const statusClass = run.status === "failed" || run.status === "needs_manual_login"
+    ? "error"
+    : run.status === "running"
+      ? "running"
+      : "";
+  const error = run.error_message
+    ? `<div class="job-meta">${escapeHtml(run.error_message)}</div>`
+    : "";
   return `
-    <div class="run-item">
-      <div><strong>${escapeHtml(run.source_portal)}</strong> · ${escapeHtml(run.status)}</div>
+    <div class="run-item ${statusClass}">
+      <div><strong>${escapeHtml(run.source_portal)}</strong> · ${escapeHtml(run.status || "unknown")}</div>
       <div class="job-meta">${when}</div>
       <div class="job-meta">Found ${run.jobs_found}, saved ${run.jobs_saved}, failed ${run.jobs_failed}</div>
+      ${error}
     </div>
   `;
+}
+
+async function loadWorkerLogs() {
+  if (!workerLogs) return;
+  const source = logSource?.value || "automation";
+  try {
+    const response = await fetch(`/api/logs?source=${encodeURIComponent(source)}&lines=400`);
+    if (!response.ok) {
+      workerLogs.textContent = "Failed to load logs.";
+      return;
+    }
+    const data = await response.json();
+    const content = (data.content || "").trim();
+    workerLogs.textContent = content || "No logs yet. Start a search to see bot worker activity.";
+    workerLogs.classList.toggle("muted", !content);
+    if (logAutoScroll?.checked) {
+      workerLogs.scrollTop = workerLogs.scrollHeight;
+    }
+  } catch (error) {
+    workerLogs.textContent = `Failed to load logs: ${error.message || error}`;
+  }
+}
+
+function startLogPolling() {
+  stopLogPolling();
+  loadWorkerLogs();
+  logPollTimer = setInterval(() => {
+    loadWorkerLogs();
+    loadRuns();
+  }, 2500);
+}
+
+function stopLogPolling() {
+  if (logPollTimer) {
+    clearInterval(logPollTimer);
+    logPollTimer = null;
+  }
 }
 
 async function loadJobs() {
@@ -548,6 +646,15 @@ async function startFindJobs() {
   findJobsModal.classList.add("hidden");
   setRunStatus("Search running — browser opening...", true);
   findJobsBtn.disabled = true;
+  showView("jobs");
+  // Show every decision while live search is collecting jobs.
+  document.querySelectorAll("#decision-chips .chip").forEach((el) => el.classList.remove("active"));
+  document.querySelector('#decision-chips .chip[data-decision="all"]')?.classList.add("active");
+  activeDecision = "all";
+  currentPage = 1;
+  await loadJobs();
+  // Keep Runs logs warm in background while searching.
+  startLogPolling();
   pollSearchStatus();
 }
 
@@ -557,11 +664,20 @@ async function pollSearchStatus() {
     const response = await fetch("/api/search/status");
     const status = await response.json();
     if (status.running) {
-      setRunStatus(`Searching: ${(status.portals || []).join(", ")}`, true);
+      const saved = status.saved || 0;
+      const found = status.found || 0;
+      const last = status.last_job_title ? ` · latest: ${status.last_job_title}` : "";
+      setRunStatus(`Searching — saved ${saved}/${found || saved}${last}`, true);
+      // Refresh job list as soon as the bot saves each job.
+      await loadJobs();
       return;
     }
     clearInterval(searchPollTimer);
     findJobsBtn.disabled = false;
+    // Keep log polling only while Runs tab is open.
+    if (runsView?.classList.contains("hidden")) {
+      stopLogPolling();
+    }
     if (status.error) {
       setRunStatus(`Search failed: ${status.error}`, false);
       alert(`Search failed: ${status.error}\n\nCheck data/search_run.log for details.`);
@@ -574,7 +690,7 @@ async function pollSearchStatus() {
       setRunStatus(`Done — found ${status.summary.found}, saved ${status.summary.saved}`, false);
       showView("jobs");
     }
-  }, 3000);
+  }, 2000);
 }
 
 function setRunStatus(text, running) {

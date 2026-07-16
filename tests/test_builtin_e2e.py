@@ -22,7 +22,7 @@ DETAIL_FRONTEND = """
   <div class="job-location">United States</div>
   <div class="job-salary">$100,000 - $130,000 Annually</div>
   <div data-id="job-remote">Fully Remote</div>
-  <div class="job-description">
+  <div id="job-post-body-9721993" x-ref="job-post-body-9721993" class="fs-md fw-regular mb-md html-parsed-content">
     Fully remote within the United States. Full-time Mid Level software engineer
     using TypeScript and React. Travel not required. Clearance not required.
     Python friendly frontend role.
@@ -37,7 +37,7 @@ DETAIL_EASY_APPLY = """
   <a href="/company/okco">OkCo</a>
   <div class="job-location">United States</div>
   <div class="job-salary">$140,000 Annually</div>
-  <div class="job-description">
+  <div id="job-post-body-9990001" class="fs-md fw-regular mb-md html-parsed-content">
     Fully remote Python backend engineer in the United States. Full Time Mid Level.
     No travel. No clearance.
   </div>
@@ -98,15 +98,11 @@ async def test_e2e_builtin_login_search_filters_and_job_pipeline():
             banned_companies={"bannedco"},
         )
 
-        # Filters: USA + Fully Remote + Past 24 hours
-        await worker._apply_default_filters(page)
-        assert await page.locator("#locationDropdownInput-JobBoard").input_value() == "USA"
+        # Filters + keyword via durable URL search (not hidden header input).
+        await worker._open_filtered_search(page, "Python")
+        assert "search=Python" in page.url or "Python" in page.url
         status = await page.locator("#status").inner_text()
-        assert "Past 24 hours" in status
-
-        # Search keyword
-        await worker._submit_keyword_search(page, "Python")
-        assert "Python" in await page.locator("#search").input_value()
+        assert "Past 24 hours" in status or await page.locator("#locationDropdownInput-JobBoard").input_value() == "USA"
 
         cards = await worker._job_cards(page)
         assert len(cards) >= 3

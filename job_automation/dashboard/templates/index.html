@@ -23,6 +23,7 @@
         <div class="brand">JobSeek Auto</div>
         <div class="topbar-actions">
           <button id="find-jobs-btn" class="primary-btn" type="button">Find Jobs</button>
+          <button id="clear-jobs-btn" class="secondary-btn" type="button">Clear Jobs</button>
           <span id="run-status" class="muted">Ready</span>
         </div>
       </header>
@@ -42,7 +43,8 @@
         <section class="panels home-panels">
           <div class="panel recent-runs">
             <h2>Recent Automation Runs</h2>
-            <div id="runs-list" class="runs-list"></div>
+            <p class="muted">Open the <strong>Runs</strong> tab for full history and live bot worker logs.</p>
+            <div id="home-runs-list" class="runs-list"></div>
           </div>
         </section>
       </section>
@@ -97,6 +99,37 @@
                 <div id="job-detail" class="job-detail empty">Select a job to view evidence and links.</div>
               </div>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="runs-view" class="view-section hidden">
+        <div class="runs-layout">
+          <div class="panel runs-history-panel">
+            <div class="jobs-panel-header">
+              <h2>Recent Runs</h2>
+              <button type="button" id="refresh-runs-btn" class="secondary-btn">Refresh</button>
+            </div>
+            <div id="runs-list" class="runs-list"></div>
+          </div>
+
+          <div class="panel runs-log-panel">
+            <div class="jobs-panel-header">
+              <h2>Bot Worker Logs</h2>
+              <div class="log-toolbar">
+                <select id="log-source">
+                  <option value="automation">automation.log</option>
+                  <option value="search">search_run.log</option>
+                  <option value="all">All logs</option>
+                </select>
+                <label class="checkbox">
+                  <input id="log-auto-scroll" type="checkbox" checked>
+                  Auto-scroll
+                </label>
+                <button type="button" id="refresh-logs-btn" class="secondary-btn">Refresh</button>
+              </div>
+            </div>
+            <pre id="worker-logs" class="worker-logs muted">No logs yet. Start a search to see bot worker activity.</pre>
           </div>
         </div>
       </section>

@@ -65,6 +65,7 @@ BUILTIN_LIST_HTML = """
       document.getElementById('date-options').classList.remove('hidden');
     });
     document.querySelector('#date-options button').addEventListener('click', () => {
+      document.getElementById('postedDateDropdownButton').textContent = 'Past 24 hours';
       document.getElementById('status').textContent = 'posted=Past 24 hours';
     });
     document.querySelectorAll('.dropdown').forEach((btn) => {

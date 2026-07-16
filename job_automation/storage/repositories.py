@@ -6,7 +6,7 @@ import json
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Select, func, or_, select, update
+from sqlalchemy import Select, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from job_automation.models.domain import Decision, Evidence, NormalizedJob, PortalRunStatus
@@ -232,6 +232,16 @@ class JobRepository:
         row.updated_at = datetime.utcnow()
         await self.session.flush()
         return row
+
+    async def clear_all_jobs(self) -> dict[str, int]:
+        sources = await self.session.execute(delete(JobSourceRow))
+        jobs = await self.session.execute(delete(JobRow))
+        runs = await self.session.execute(delete(PortalRunRow))
+        return {
+            "jobs_deleted": jobs.rowcount or 0,
+            "sources_deleted": sources.rowcount or 0,
+            "runs_deleted": runs.rowcount or 0,
+        }
 
 
 class PortalRunRepository:

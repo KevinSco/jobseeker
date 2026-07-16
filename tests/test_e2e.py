@@ -200,6 +200,28 @@ def test_delete_session_api(seeded_client: TestClient, tmp_path, monkeypatch):
     assert not session_file.exists()
 
 
+def test_logs_api(seeded_client: TestClient, tmp_path, monkeypatch):
+    from job_automation import paths
+    from job_automation.dashboard import search_service
+
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    (logs_dir / "automation.log").write_text(
+        "2026-07-15 00:00:00 | INFO | builtin | - | search | Searching Built In keyword: Python\n",
+        encoding="utf-8",
+    )
+    search_log = tmp_path / "search_run.log"
+    search_log.write_text("search subprocess started\n", encoding="utf-8")
+    monkeypatch.setattr(paths, "LOGS_DIR", logs_dir)
+    monkeypatch.setattr(search_service, "LOG_PATH", search_log)
+
+    response = seeded_client.get("/api/logs", params={"source": "all", "lines": 50})
+    assert response.status_code == 200
+    data = response.json()
+    assert "Searching Built In keyword: Python" in data["content"]
+    assert "search subprocess started" in data["content"]
+
+
 def test_e2e_runs_api(seeded_client: TestClient):
     response = seeded_client.get("/api/runs")
     assert response.status_code == 200
