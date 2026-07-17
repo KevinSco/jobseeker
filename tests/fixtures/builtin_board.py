@@ -6,9 +6,11 @@ BUILTIN_LIST_HTML = """
 <head><title>Built In Jobs</title></head>
 <body>
   <input id="locationDropdownInput-JobBoard" placeholder="Location" />
-  <div id="location-options" class="hidden">
-    <button type="button">USA</button>
-  </div>
+  <ul class="dropdown-menu p-0 w-100 hidden" x-ref="locationDropdownMenu" aria-labelledby="locationDropdownInput-JobBoard">
+    <div class="list-group">
+      <label class="list-group-item list-group-item-action border-0 text-truncate">United States</label>
+    </div>
+  </ul>
   <button id="remotePreferenceDropdownButton" type="button">Remote Preference</button>
   <div id="remote-options" class="hidden">
     <button type="button">Fully Remote</button>
@@ -21,25 +23,43 @@ BUILTIN_LIST_HTML = """
   <div id="status">idle</div>
 
   <div class="job-card" data-card="1">
-    <a href="/company/secco">SecCo</a>
+    <a id="company-title" href="/company/secco">SecCo</a>
     <a class="job-title-link" href="/job/security-role-1">Security Platform Engineer</a>
     <div>3 Hours Ago · Remote · United States · 120K Annually</div>
     <button id="job-dropdown-button" type="button" class="dropdown">Expand</button>
     <button type="button" aria-label="Save job" class="heart">Heart</button>
     <div class="mb-md fs-xs fw-bold industry" style="display:none">Cybersecurity</div>
+    <div class="border rounded-2 mt-md p-sm">
+      <span class="fs-xs fw-bold text-uppercase">Top Skills:</span>
+      <span class="d-md-inline ps-md-sm">
+        <span class="fs-xs text-gray-04 mx-sm">React</span>
+        <span class="fs-xs text-gray-04 mx-sm">Storybook</span>
+        <span class="fs-xs text-gray-04 mx-sm">Tailwind</span>
+        <span class="fs-xs text-gray-04 mx-sm">Typescript</span>
+      </span>
+    </div>
   </div>
 
   <div class="job-card" data-card="2">
-    <a href="/company/apkudo">Apkudo</a>
+    <a id="company-title" href="/company/apkudo">Apkudo</a>
     <a class="job-title-link" href="/job/frontend-os-2">Frontend Engineer, Device OS</a>
     <div>3 Hours Ago · Remote · United States · 100K-130K Annually · Senior level</div>
     <button id="job-dropdown-button" type="button" class="dropdown">Expand</button>
     <button type="button" aria-label="Save job" class="heart">Heart</button>
     <div class="mb-md fs-xs fw-bold industry" style="display:none">Software</div>
+    <div class="border rounded-2 mt-md p-sm">
+      <span class="fs-xs fw-bold text-uppercase">Top Skills:</span>
+      <span class="d-md-inline ps-md-sm">
+        <span class="fs-xs text-gray-04 mx-sm">TypeScript</span>
+        <span class="fs-xs text-gray-04 mx-sm">React</span>
+        <span class="fs-xs text-gray-04 mx-sm">Python</span>
+        <span class="fs-xs text-gray-04 mx-sm">Node.js</span>
+      </span>
+    </div>
   </div>
 
   <div class="job-card" data-card="3">
-    <a href="/company/bannedco">BannedCo</a>
+    <a id="company-title" href="/company/bannedco">BannedCo</a>
     <a class="job-title-link" href="/job/python-3">Python Engineer</a>
     <div>Yesterday · Remote · United States · 140K Annually</div>
     <button id="job-dropdown-button" type="button" class="dropdown">Expand</button>
@@ -49,11 +69,15 @@ BUILTIN_LIST_HTML = """
 
   <script>
     document.getElementById('locationDropdownInput-JobBoard').addEventListener('click', () => {
-      document.getElementById('location-options').classList.remove('hidden');
+      document.querySelector('ul[x-ref="locationDropdownMenu"]').classList.remove('hidden');
     });
-    document.querySelector('#location-options button').addEventListener('click', () => {
-      document.getElementById('locationDropdownInput-JobBoard').value = 'USA';
-      document.getElementById('status').textContent = 'location=USA';
+    document.getElementById('locationDropdownInput-JobBoard').addEventListener('input', () => {
+      document.querySelector('ul[x-ref="locationDropdownMenu"]').classList.remove('hidden');
+    });
+    document.querySelector('ul[x-ref="locationDropdownMenu"] label').addEventListener('click', () => {
+      document.getElementById('locationDropdownInput-JobBoard').value = 'United States';
+      document.getElementById('status').textContent = 'location=United States';
+      document.querySelector('ul[x-ref="locationDropdownMenu"]').classList.add('hidden');
     });
     document.getElementById('remotePreferenceDropdownButton').addEventListener('click', () => {
       document.getElementById('remote-options').classList.remove('hidden');

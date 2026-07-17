@@ -29,6 +29,7 @@ def job_row_to_normalized(row: JobRow) -> NormalizedJob:
         source_job_id=row.source_job_id,
         title=row.title,
         company=row.company,
+        company_url=row.company_url,
         location=row.location,
         remote_policy=row.remote_policy,
         commitment=row.commitment,
@@ -116,6 +117,7 @@ class JobRepository:
         row.source_job_id = job.source_job_id
         row.title = job.title
         row.company = job.company
+        row.company_url = job.company_url
         row.location = job.location
         row.remote_policy = job.remote_policy
         row.commitment = job.commitment
@@ -242,6 +244,22 @@ class JobRepository:
             "sources_deleted": sources.rowcount or 0,
             "runs_deleted": runs.rowcount or 0,
         }
+
+    async def delete_job(self, job_id: int) -> bool:
+        row = await self.get_job(job_id)
+        if not row:
+            return False
+        await self.session.execute(delete(JobSourceRow).where(JobSourceRow.job_id == job_id))
+        await self.session.execute(delete(JobRow).where(JobRow.id == job_id))
+        return True
+
+    async def delete_jobs(self, job_ids: list[int]) -> int:
+        ids = [int(job_id) for job_id in job_ids if job_id is not None]
+        if not ids:
+            return 0
+        await self.session.execute(delete(JobSourceRow).where(JobSourceRow.job_id.in_(ids)))
+        result = await self.session.execute(delete(JobRow).where(JobRow.id.in_(ids)))
+        return result.rowcount or 0
 
 
 class PortalRunRepository:

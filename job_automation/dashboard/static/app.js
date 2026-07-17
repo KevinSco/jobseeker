@@ -13,6 +13,10 @@ let credentialsData = { portals: [] };
 let searchPollTimer = null;
 let activeDecision = "all";
 let activeEntity = "position";
+let selectionMode = false;
+const selectedJobIds = new Set();
+let visibleJobIds = [];
+const LONG_PRESS_MS = 1000;
 
 const runsList = document.getElementById("runs-list");
 const homeRunsList = document.getElementById("home-runs-list");
@@ -29,6 +33,11 @@ const homeSearchInput = document.getElementById("home-search-input");
 const jobsPortalFilter = document.getElementById("jobs-portal-filter");
 const jobsCount = document.getElementById("jobs-count");
 const jobsListTitle = document.getElementById("jobs-list-title");
+const jobsSelectBar = document.getElementById("jobs-select-bar");
+const jobsSelectCount = document.getElementById("jobs-select-count");
+const selectAllJobsBtn = document.getElementById("select-all-jobs");
+const cancelJobsSelectBtn = document.getElementById("cancel-jobs-select");
+const deleteSelectedJobsBtn = document.getElementById("delete-selected-jobs");
 const runStatus = document.getElementById("run-status");
 const findJobsBtn = document.getElementById("find-jobs-btn");
 const clearJobsBtn = document.getElementById("clear-jobs-btn");
@@ -148,9 +157,14 @@ findJobsBtn.addEventListener("click", async () => {
 });
 
 clearJobsBtn?.addEventListener("click", async () => {
-  if (!confirm("Delete all collected jobs, sources, and run history from the database?")) {
-    return;
-  }
+  const ok = await showAppConfirm({
+    title: "Clear all jobs?",
+    message: "Delete all collected jobs, sources, and run history from the database?",
+    confirmLabel: "Clear all",
+    cancelLabel: "Cancel",
+    danger: true,
+  });
+  if (!ok) return;
   try {
     const response = await fetch("/api/jobs/clear", { method: "POST" });
     if (!response.ok) {
@@ -162,9 +176,9 @@ clearJobsBtn?.addEventListener("click", async () => {
     jobDetail.innerHTML = `<div class="job-detail empty">Select a job to view evidence and links.</div>`;
     await loadJobs();
     await loadRuns();
-    showCredentialToast(`Cleared ${data.jobs_deleted || 0} jobs from database.`);
+    showCredentialToast(`Cleared ${data.jobs_deleted || 0} jobs from database.`, "success");
   } catch (error) {
-    alert(error.message || "Failed to clear jobs");
+    showCredentialToast(error.message || "Failed to clear jobs", "error");
   }
 });
 
@@ -267,6 +281,7 @@ async function loadJobs() {
   const response = await fetch(`/api/jobs?${params.toString()}`);
   const data = await response.json();
   jobsCount.textContent = `${data.total} result${data.total === 1 ? "" : "s"}`;
+  visibleJobIds = (data.jobs || []).map((job) => Number(job.id));
 
   if (activeEntity === "companies") {
     jobsList.innerHTML = renderJobsByCompany(data.jobs) || "<div class='muted'>No jobs found.</div>";
@@ -276,6 +291,7 @@ async function loadJobs() {
 
   renderPagination(data.total, data.page, data.page_size);
   bindJobCards();
+  updateSelectBar();
 }
 
 function renderJobsByCompany(jobs) {
@@ -302,25 +318,140 @@ function decisionLabel(decision) {
 }
 
 function renderJobCard(job) {
+  const checked = selectedJobIds.has(job.id);
+  const selectedClass = selectedJobId === job.id && !selectionMode ? "selected" : "";
+  const checkedClass = checked ? "checked" : "";
+  const selectClass = selectionMode ? "select-mode" : "";
   return `
-    <div class="job-card ${selectedJobId === job.id ? "selected" : ""}" data-job-id="${job.id}">
-      <div class="job-title">${escapeHtml(job.title || "Untitled")}</div>
-      <div class="job-meta">${escapeHtml(job.company || "Unknown company")} · ${escapeHtml(job.source_portal || "")}</div>
-      <div class="job-meta">${escapeHtml(job.location || "Remote/Unknown")} · ${escapeHtml(job.salary_text || "Salary N/A")}</div>
-      <div style="margin-top:8px"><span class="badge ${job.decision || ""}">${escapeHtml(decisionLabel(job.decision))}</span></div>
+    <div class="job-card ${selectedClass} ${checkedClass} ${selectClass}" data-job-id="${job.id}">
+      ${
+        selectionMode
+          ? `<label class="job-select" onclick="event.stopPropagation()">
+              <input type="checkbox" class="job-select-input" data-job-id="${job.id}" ${checked ? "checked" : ""}>
+            </label>`
+          : ""
+      }
+      <div class="job-card-body">
+        <div class="job-title">${escapeHtml(job.title || "Untitled")}</div>
+        <div class="job-meta">${escapeHtml(job.company || "Unknown company")} · ${escapeHtml(job.source_portal || "")}</div>
+        <div class="job-meta">${escapeHtml(job.location || "Remote/Unknown")} · ${escapeHtml(job.salary_text || "Salary N/A")}</div>
+        <div style="margin-top:8px"><span class="badge ${job.decision || ""}">${escapeHtml(decisionLabel(job.decision))}</span></div>
+      </div>
     </div>
   `;
 }
 
+function updateSelectBar() {
+  if (!jobsSelectBar) return;
+  jobsSelectBar.classList.toggle("hidden", !selectionMode);
+  if (jobsSelectCount) {
+    jobsSelectCount.textContent = `${selectedJobIds.size} selected`;
+  }
+  if (deleteSelectedJobsBtn) {
+    deleteSelectedJobsBtn.disabled = selectedJobIds.size === 0;
+  }
+  if (selectAllJobsBtn) {
+    const allSelected =
+      visibleJobIds.length > 0 && visibleJobIds.every((id) => selectedJobIds.has(id));
+    selectAllJobsBtn.textContent = allSelected ? "Deselect All" : "Select All";
+    selectAllJobsBtn.disabled = visibleJobIds.length === 0;
+  }
+}
+
+function selectAllVisibleJobs() {
+  const allSelected =
+    visibleJobIds.length > 0 && visibleJobIds.every((id) => selectedJobIds.has(id));
+  if (allSelected) {
+    for (const id of visibleJobIds) selectedJobIds.delete(id);
+  } else {
+    for (const id of visibleJobIds) selectedJobIds.add(id);
+  }
+  updateSelectBar();
+  loadJobs();
+}
+
+function enterSelectionMode(jobId) {
+  selectionMode = true;
+  selectedJobIds.clear();
+  if (jobId != null) selectedJobIds.add(Number(jobId));
+  updateSelectBar();
+  loadJobs();
+}
+
+function exitSelectionMode() {
+  selectionMode = false;
+  selectedJobIds.clear();
+  updateSelectBar();
+  loadJobs();
+}
+
+function toggleJobSelection(jobId, checked) {
+  const id = Number(jobId);
+  if (checked) selectedJobIds.add(id);
+  else selectedJobIds.delete(id);
+  updateSelectBar();
+  const card = document.querySelector(`.job-card[data-job-id="${id}"]`);
+  if (card) {
+    card.classList.toggle("checked", checked);
+    const input = card.querySelector(".job-select-input");
+    if (input) input.checked = checked;
+  }
+}
+
 function bindJobCards() {
   document.querySelectorAll(".job-card").forEach((card) => {
-    card.addEventListener("click", async () => {
-      selectedJobId = Number(card.dataset.jobId);
+    const jobId = Number(card.dataset.jobId);
+    let pressTimer = null;
+    let longPressTriggered = false;
+
+    const clearPress = () => {
+      if (pressTimer) {
+        clearTimeout(pressTimer);
+        pressTimer = null;
+      }
+    };
+
+    const startPress = (event) => {
+      if (event.type === "mousedown" && event.button !== 0) return;
+      longPressTriggered = false;
+      clearPress();
+      pressTimer = setTimeout(() => {
+        longPressTriggered = true;
+        enterSelectionMode(jobId);
+      }, LONG_PRESS_MS);
+    };
+
+    card.addEventListener("mousedown", startPress);
+    card.addEventListener("touchstart", startPress, { passive: true });
+    card.addEventListener("mouseup", clearPress);
+    card.addEventListener("mouseleave", clearPress);
+    card.addEventListener("touchend", clearPress);
+    card.addEventListener("touchcancel", clearPress);
+
+    card.addEventListener("click", async (event) => {
+      if (longPressTriggered) {
+        longPressTriggered = false;
+        return;
+      }
+      if (selectionMode) {
+        const currentlyChecked = selectedJobIds.has(jobId);
+        toggleJobSelection(jobId, !currentlyChecked);
+        return;
+      }
+      selectedJobId = jobId;
       await loadJobDetail(selectedJobId);
       loadJobs();
     });
+
+    card.querySelector(".job-select-input")?.addEventListener("change", (event) => {
+      toggleJobSelection(jobId, event.target.checked);
+    });
   });
 }
+
+cancelJobsSelectBtn?.addEventListener("click", () => exitSelectionMode());
+selectAllJobsBtn?.addEventListener("click", () => selectAllVisibleJobs());
+deleteSelectedJobsBtn?.addEventListener("click", () => deleteSelectedJobs());
 
 async function loadJobDetail(jobId) {
   const response = await fetch(`/api/jobs/${jobId}`);
@@ -337,15 +468,24 @@ async function loadJobDetail(jobId) {
 
   jobDetail.innerHTML = `
     <div class="job-title">${escapeHtml(job.title || "Untitled")}</div>
-    <div class="job-meta">${escapeHtml(job.company || "")} · ${escapeHtml(job.location || "")}</div>
+    <div class="job-meta">
+      ${
+        job.company_url
+          ? `<a href="${escapeHtml(job.company_url)}" target="_blank" rel="noopener">${escapeHtml(job.company || "Company")}</a>`
+          : escapeHtml(job.company || "")
+      }
+      · ${escapeHtml(job.location || "")}
+    </div>
     <div style="margin:8px 0"><span class="badge ${job.decision || ""}">${escapeHtml(decisionLabel(job.decision))}</span></div>
     <p>${escapeHtml(job.decision_reason || "")}</p>
     <div class="detail-actions">
       ${job.apply_url ? `<a href="${job.apply_url}" target="_blank" rel="noopener">Open Apply URL</a>` : ""}
       ${job.job_url ? `<a href="${job.job_url}" target="_blank" rel="noopener">Open Source URL</a>` : ""}
+      ${job.company_url ? `<a href="${job.company_url}" target="_blank" rel="noopener">Open Company</a>` : ""}
       <button type="button" id="mark-review">Need Review</button>
       <button type="button" id="mark-eligible">Enable</button>
       <button type="button" id="mark-rejected">Reject</button>
+      <button type="button" id="delete-job" class="danger-btn">Delete</button>
     </div>
     <h3>Evidence</h3>
     ${evidence || "<div class='muted'>No evidence stored.</div>"}
@@ -354,6 +494,50 @@ async function loadJobDetail(jobId) {
   document.getElementById("mark-review")?.addEventListener("click", () => updateDecision(job.id, "needs_review"));
   document.getElementById("mark-eligible")?.addEventListener("click", () => updateDecision(job.id, "eligible"));
   document.getElementById("mark-rejected")?.addEventListener("click", () => updateDecision(job.id, "rejected"));
+  document.getElementById("delete-job")?.addEventListener("click", () => {
+    selectedJobIds.clear();
+    selectedJobIds.add(job.id);
+    deleteSelectedJobs();
+  });
+}
+
+async function deleteSelectedJobs() {
+  const ids = Array.from(selectedJobIds);
+  if (!ids.length) {
+    showCredentialToast("Select at least one job to delete.", "error");
+    return;
+  }
+  const count = ids.length;
+  const ok = await showAppConfirm({
+    title: count === 1 ? "Delete this job?" : `Delete ${count} jobs?`,
+    message:
+      count === 1
+        ? "This position will be removed from the database."
+        : `Delete ${count} selected jobs from the database?`,
+    confirmLabel: "Delete",
+    cancelLabel: "Cancel",
+    danger: true,
+  });
+  if (!ok) return;
+
+  const response = await fetch("/api/jobs/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ job_ids: ids }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    showCredentialToast(err.detail || "Failed to delete jobs", "error");
+    return;
+  }
+  const data = await response.json();
+  if (ids.includes(selectedJobId)) {
+    selectedJobId = null;
+    jobDetail.innerHTML = "<div class='muted'>Select a job to inspect evidence and decisions.</div>";
+  }
+  exitSelectionMode();
+  showCredentialToast(`Deleted ${data.jobs_deleted || ids.length} job(s).`, "success");
+  await loadJobs();
 }
 
 async function updateDecision(jobId, decision) {
@@ -369,16 +553,84 @@ async function updateDecision(jobId, decision) {
 function renderPagination(total, page, pageSize) {
   const pages = Math.max(1, Math.ceil(total / pageSize));
   pagination.innerHTML = "";
-  for (let i = 1; i <= pages && i <= 8; i += 1) {
+  if (total <= 0) return;
+
+  const makeNavBtn = (label, { disabled = false, active = false, onClick } = {}) => {
     const button = document.createElement("button");
-    button.textContent = String(i);
-    button.disabled = i === page;
-    button.addEventListener("click", () => {
-      currentPage = i;
-      loadJobs();
-    });
+    button.type = "button";
+    button.className = `page-nav-btn${active ? " active" : ""}${disabled ? " disabled" : ""}`;
+    button.innerHTML = label;
+    button.disabled = Boolean(disabled);
+    button.setAttribute("aria-disabled", disabled ? "true" : "false");
+    if (active) button.setAttribute("aria-current", "page");
+    if (onClick && !disabled) {
+      button.addEventListener("click", onClick);
+    }
     pagination.appendChild(button);
+    return button;
+  };
+
+  makeNavBtn('<span aria-hidden="true">‹</span>', {
+    disabled: page <= 1,
+    onClick: () => {
+      currentPage = Math.max(1, page - 1);
+      loadJobs();
+    },
+  });
+
+  // Built In–style window: prev, nearby page numbers, next.
+  const windowSize = 5;
+  let start = Math.max(1, page - Math.floor(windowSize / 2));
+  let end = Math.min(pages, start + windowSize - 1);
+  start = Math.max(1, end - windowSize + 1);
+
+  if (start > 1) {
+    makeNavBtn("1", {
+      onClick: () => {
+        currentPage = 1;
+        loadJobs();
+      },
+    });
+    if (start > 2) {
+      const dots = document.createElement("span");
+      dots.className = "page-nav-ellipsis";
+      dots.textContent = "…";
+      pagination.appendChild(dots);
+    }
   }
+
+  for (let i = start; i <= end; i += 1) {
+    makeNavBtn(String(i), {
+      active: i === page,
+      onClick: () => {
+        currentPage = i;
+        loadJobs();
+      },
+    });
+  }
+
+  if (end < pages) {
+    if (end < pages - 1) {
+      const dots = document.createElement("span");
+      dots.className = "page-nav-ellipsis";
+      dots.textContent = "…";
+      pagination.appendChild(dots);
+    }
+    makeNavBtn(String(pages), {
+      onClick: () => {
+        currentPage = pages;
+        loadJobs();
+      },
+    });
+  }
+
+  makeNavBtn('<span aria-hidden="true">›</span>', {
+    disabled: page >= pages,
+    onClick: () => {
+      currentPage = Math.min(pages, page + 1);
+      loadJobs();
+    },
+  });
 }
 
 async function loadCredentials() {
@@ -571,7 +823,7 @@ function bindCredentialForms() {
   });
 }
 
-function showCredentialToast(message) {
+function showCredentialToast(message, variant = "success") {
   let toast = document.getElementById("credential-toast");
   if (!toast) {
     toast = document.createElement("div");
@@ -580,8 +832,68 @@ function showCredentialToast(message) {
     document.body.appendChild(toast);
   }
   toast.textContent = message;
+  toast.classList.remove("toast-error", "toast-success", "visible");
+  toast.classList.add(variant === "error" ? "toast-error" : "toast-success");
+  // force reflow for animation restart
+  void toast.offsetWidth;
   toast.classList.add("visible");
-  setTimeout(() => toast.classList.remove("visible"), 2500);
+  clearTimeout(showCredentialToast._timer);
+  showCredentialToast._timer = setTimeout(() => toast.classList.remove("visible"), 2800);
+}
+
+function showAppConfirm({
+  title = "Confirm",
+  message = "",
+  confirmLabel = "Delete",
+  cancelLabel = "Cancel",
+  danger = true,
+} = {}) {
+  const modal = document.getElementById("app-confirm-modal");
+  const titleEl = document.getElementById("app-confirm-title");
+  const messageEl = document.getElementById("app-confirm-message");
+  const okBtn = document.getElementById("app-confirm-ok");
+  const cancelBtn = document.getElementById("app-confirm-cancel");
+  const card = modal?.querySelector(".app-alert-card");
+  if (!modal || !titleEl || !messageEl || !okBtn || !cancelBtn) {
+    return Promise.resolve(window.confirm(message || title));
+  }
+
+  titleEl.textContent = title;
+  messageEl.textContent = message;
+  okBtn.textContent = confirmLabel;
+  cancelBtn.textContent = cancelLabel;
+  card?.classList.toggle("app-alert-danger", Boolean(danger));
+  card?.classList.toggle("app-alert-info", !danger);
+  okBtn.className = danger ? "danger-btn" : "primary-btn";
+
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  okBtn.focus();
+
+  return new Promise((resolve) => {
+    const close = (result) => {
+      modal.classList.add("hidden");
+      modal.setAttribute("aria-hidden", "true");
+      okBtn.removeEventListener("click", onOk);
+      cancelBtn.removeEventListener("click", onCancel);
+      modal.removeEventListener("click", onBackdrop);
+      document.removeEventListener("keydown", onKey);
+      resolve(result);
+    };
+    const onOk = () => close(true);
+    const onCancel = () => close(false);
+    const onBackdrop = (event) => {
+      if (event.target === modal) close(false);
+    };
+    const onKey = (event) => {
+      if (event.key === "Escape") close(false);
+      if (event.key === "Enter") close(true);
+    };
+    okBtn.addEventListener("click", onOk);
+    cancelBtn.addEventListener("click", onCancel);
+    modal.addEventListener("click", onBackdrop);
+    document.addEventListener("keydown", onKey);
+  });
 }
 
 function renderFindPortalsModal() {

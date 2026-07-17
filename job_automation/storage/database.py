@@ -24,6 +24,10 @@ INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_portal_runs_portal ON portal_runs(source_portal)",
 ]
 
+COLUMN_MIGRATIONS = [
+    ("jobs", "company_url", "ALTER TABLE jobs ADD COLUMN company_url TEXT"),
+]
+
 
 def get_database_url() -> str:
     ensure_dirs()
@@ -44,10 +48,21 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
     return _session_factory
 
 
+def _apply_column_migrations(sync_conn) -> None:
+    from sqlalchemy import text
+
+    for table, column, statement in COLUMN_MIGRATIONS:
+        rows = sync_conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+        existing = {row[1] for row in rows}
+        if column not in existing:
+            sync_conn.execute(text(statement))
+
+
 async def init_db() -> None:
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_apply_column_migrations)
         for statement in INDEX_STATEMENTS:
             await conn.exec_driver_sql(statement)
 

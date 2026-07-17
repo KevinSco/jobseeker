@@ -45,7 +45,11 @@ def transform_raw_job(raw: RawJob, config: SearchConfig) -> NormalizedJob:
     government = parse_government_industry(combined_text, config.keywords)
     role_match = parse_role_match(raw.job_card_title, config.target_roles)
     role_excluded = parse_excluded_role(raw.job_card_title, config.excluded_roles)
-    skill_match = parse_skill_match(combined_text, config.target_skills)
+    skill_match = parse_skill_match(
+        combined_text,
+        config.target_skills,
+        top_skills=raw.top_skills,
+    )
     commitment = parse_commitment(combined_text, config.commitment_types)
     experience = parse_experience_level(combined_text, config.experience_levels)
 
@@ -70,6 +74,7 @@ def transform_raw_job(raw: RawJob, config: SearchConfig) -> NormalizedJob:
         source_job_id=raw.source_job_id,
         title=normalize_text(raw.job_card_title),
         company=normalize_company(raw.job_card_company),
+        company_url=normalize_text(raw.company_url),
         location=normalize_text(raw.job_card_location),
         remote_policy=str(remote.value) if remote.value is not None else None,
         commitment=str(commitment.value) if commitment.value else None,
@@ -85,7 +90,7 @@ def transform_raw_job(raw: RawJob, config: SearchConfig) -> NormalizedJob:
         security_related_company_or_role=bool(security_related.value),
         role_excluded=bool(role_excluded.value),
         role_match=bool(role_match.value),
-        skill_match=bool(skill_match.value),
+        skill_match=skill_match.value if isinstance(skill_match.value, bool) else None,
         job_url=raw.portal_job_url or raw.job_card_url,
         apply_url=raw.apply_url,
         description_text=description or None,

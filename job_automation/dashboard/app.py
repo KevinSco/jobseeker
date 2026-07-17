@@ -33,6 +33,10 @@ class JobUpdateRequest(BaseModel):
     status: str | None = None
 
 
+class JobDeleteRequest(BaseModel):
+    job_ids: list[int]
+
+
 class CredentialSaveRequest(BaseModel):
     username: str
     password: str
@@ -181,6 +185,13 @@ def create_app() -> FastAPI:
             result = await repo.clear_all_jobs()
         return {"cleared": True, **result}
 
+    @app.post("/api/jobs/delete")
+    async def delete_jobs(payload: JobDeleteRequest) -> dict[str, Any]:
+        async with session_scope() as session:
+            repo = JobRepository(session)
+            deleted = await repo.delete_jobs(payload.job_ids)
+        return {"deleted": True, "jobs_deleted": deleted, "job_ids": payload.job_ids}
+
     @app.get("/api/jobs/{job_id}")
     async def get_job(job_id: int) -> dict[str, Any]:
         async with session_scope() as session:
@@ -199,6 +210,15 @@ def create_app() -> FastAPI:
             if not row:
                 raise HTTPException(status_code=404, detail="Job not found")
             return _serialize_job(row, include_description=True)
+
+    @app.post("/api/jobs/{job_id}/delete")
+    async def delete_job(job_id: int) -> dict[str, Any]:
+        async with session_scope() as session:
+            repo = JobRepository(session)
+            deleted = await repo.delete_job(job_id)
+            if not deleted:
+                raise HTTPException(status_code=404, detail="Job not found")
+        return {"deleted": True, "job_id": job_id}
 
     @app.get("/api/runs")
     async def list_runs(limit: int = 10) -> dict[str, Any]:
@@ -273,6 +293,7 @@ def _serialize_job(row, *, include_description: bool = False) -> dict[str, Any]:
         "source_portal": row.source_portal,
         "title": row.title,
         "company": row.company,
+        "company_url": row.company_url,
         "location": row.location,
         "remote_policy": row.remote_policy,
         "salary_text": row.salary_text,

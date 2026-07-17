@@ -74,7 +74,8 @@ async def _install_builtin_routes(page) -> None:
         else:
             await route.fulfill(status=200, content_type="text/html", body=BUILTIN_LIST_HTML)
 
-    await page.route("https://builtin.com/**", handler)
+    # Context-level so detail tabs opened by the worker also hit these mocks.
+    await page.context.route("https://builtin.com/**", handler)
 
 
 @pytest.mark.asyncio
@@ -102,7 +103,7 @@ async def test_e2e_builtin_login_search_filters_and_job_pipeline():
         await worker._open_filtered_search(page, "Python")
         assert "search=Python" in page.url or "Python" in page.url
         status = await page.locator("#status").inner_text()
-        assert "Past 24 hours" in status or await page.locator("#locationDropdownInput-JobBoard").input_value() == "USA"
+        assert "Past 24 hours" in status or await page.locator("#locationDropdownInput-JobBoard").input_value() == "United States"
 
         cards = await worker._job_cards(page)
         assert len(cards) >= 3

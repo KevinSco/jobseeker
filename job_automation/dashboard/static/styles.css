@@ -166,6 +166,68 @@ body {
 
 .job-card.selected { border-color: var(--accent); background: #1b1f29; }
 
+.job-card.select-mode {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  user-select: none;
+}
+
+.job-card.checked {
+  border-color: var(--accent);
+  background: #1b2433;
+}
+
+.job-select {
+  display: flex;
+  align-items: center;
+  padding-top: 2px;
+  cursor: pointer;
+}
+
+.job-select-input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.job-card-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.jobs-select-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: #1b1f29;
+}
+
+.jobs-select-bar.hidden {
+  display: none;
+}
+
+.jobs-select-bar .danger-btn,
+.detail-actions .danger-btn,
+#delete-selected-jobs {
+  background: #3a1f24;
+  border-color: #7a3038;
+  color: #f0c4c8;
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.jobs-select-bar .danger-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .job-title { font-weight: 600; margin-bottom: 4px; }
 .job-meta { color: var(--muted); font-size: 13px; }
 
@@ -193,8 +255,10 @@ body {
 
 .detail-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin: 12px 0;
+  align-items: center;
 }
 
 .detail-actions a, .detail-actions button {
@@ -207,19 +271,62 @@ body {
   cursor: pointer;
 }
 
-.pagination {
-  display: flex;
-  gap: 8px;
-  margin-top: 12px;
+.detail-actions .danger-btn {
+  background: #3a1f24;
+  border-color: #7a3038;
+  color: #f0c4c8;
+  margin-left: auto;
 }
 
-.pagination button {
-  background: #222733;
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 4px;
+}
+
+.pagination .page-nav-btn {
+  min-width: 36px;
+  height: 36px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
   color: var(--text);
-  border: 1px solid var(--panel-border);
-  border-radius: 8px;
-  padding: 6px 10px;
+  border: 1px solid #3a4252;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
   cursor: pointer;
+}
+
+.pagination .page-nav-btn:hover:not(:disabled):not(.active) {
+  border-color: #5b657a;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.pagination .page-nav-btn.active {
+  background: #2f6bff;
+  border-color: #2f6bff;
+  color: #fff;
+  cursor: default;
+}
+
+.pagination .page-nav-btn:disabled,
+.pagination .page-nav-btn.disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.pagination .page-nav-ellipsis {
+  color: var(--muted);
+  min-width: 16px;
+  text-align: center;
+  user-select: none;
 }
 
 .runs-layout {
@@ -616,6 +723,7 @@ body {
   transition: opacity 0.2s, transform 0.2s;
   z-index: 200;
   max-width: 320px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
 }
 
 .builtin-hint {
@@ -632,5 +740,115 @@ body {
 .credential-toast.visible {
   opacity: 1;
   transform: translateY(0);
+}
+
+.credential-toast.toast-error {
+  border-color: #7a3038;
+  background: #2a171b;
+  color: #f0c4c8;
+}
+
+.credential-toast.toast-success {
+  border-color: #2f6b4a;
+  background: #14241c;
+  color: #b8f0d0;
+}
+
+/* react-alert style confirm dialog */
+.app-alert-modal {
+  z-index: 220;
+  background: rgba(8, 10, 14, 0.72);
+  backdrop-filter: blur(2px);
+}
+
+.app-alert-card {
+  width: min(420px, 92vw);
+  background: #1a1f2b;
+  border: 1px solid #2c3342;
+  border-radius: 14px;
+  padding: 20px 20px 16px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+  animation: app-alert-in 0.18s ease-out;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-areas:
+    "icon body"
+    "actions actions";
+  gap: 12px 14px;
+}
+
+.app-alert-icon {
+  grid-area: icon;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 18px;
+  background: rgba(231, 76, 60, 0.18);
+  color: #ff8b80;
+  border: 1px solid rgba(231, 76, 60, 0.35);
+}
+
+.app-alert-card.app-alert-info .app-alert-icon {
+  background: rgba(47, 107, 255, 0.18);
+  color: #9bbcff;
+  border-color: rgba(47, 107, 255, 0.35);
+}
+
+.app-alert-body {
+  grid-area: body;
+  min-width: 0;
+}
+
+.app-alert-body h3 {
+  margin: 2px 0 6px;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.app-alert-body p {
+  margin: 0;
+  line-height: 1.45;
+  font-size: 14px;
+}
+
+.app-alert-actions {
+  grid-area: actions;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.app-alert-actions .danger-btn {
+  background: #c0392b;
+  border: 1px solid #e74c3c;
+  color: #fff;
+  border-radius: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.app-alert-actions .danger-btn:hover {
+  background: #e74c3c;
+}
+
+.app-alert-actions .secondary-btn {
+  border-radius: 8px;
+  padding: 8px 14px;
+}
+
+@keyframes app-alert-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 

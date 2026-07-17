@@ -90,6 +90,12 @@
                   <h2 id="jobs-list-title">Positions</h2>
                   <span id="jobs-count" class="muted"></span>
                 </div>
+                <div id="jobs-select-bar" class="jobs-select-bar hidden">
+                  <button type="button" id="select-all-jobs" class="secondary-btn">Select All</button>
+                  <span id="jobs-select-count" class="muted">0 selected</span>
+                  <button type="button" id="cancel-jobs-select" class="secondary-btn">Cancel</button>
+                  <button type="button" id="delete-selected-jobs" class="danger-btn">Delete</button>
+                </div>
                 <div id="jobs-list" class="jobs-list"></div>
                 <div id="pagination" class="pagination"></div>
               </div>
@@ -157,6 +163,20 @@
         <button type="button" id="go-settings-btn" class="secondary-btn">Open Settings</button>
         <button type="button" id="cancel-find-jobs" class="secondary-btn">Cancel</button>
         <button type="button" id="confirm-find-jobs" class="primary-btn">Start Search</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="app-confirm-modal" class="modal app-alert-modal hidden" aria-hidden="true">
+    <div class="app-alert-card app-alert-danger" role="alertdialog" aria-modal="true" aria-labelledby="app-confirm-title">
+      <div class="app-alert-icon" aria-hidden="true">!</div>
+      <div class="app-alert-body">
+        <h3 id="app-confirm-title">Confirm</h3>
+        <p id="app-confirm-message" class="muted"></p>
+      </div>
+      <div class="app-alert-actions">
+        <button type="button" id="app-confirm-cancel" class="secondary-btn">Cancel</button>
+        <button type="button" id="app-confirm-ok" class="danger-btn">Delete</button>
       </div>
     </div>
   </div>

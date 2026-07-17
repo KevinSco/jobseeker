@@ -20,6 +20,7 @@ class JobRow(Base):
     source_job_id: Mapped[str | None] = mapped_column(String(256))
     title: Mapped[str | None] = mapped_column(String(512))
     company: Mapped[str | None] = mapped_column(String(512))
+    company_url: Mapped[str | None] = mapped_column(Text)
     location: Mapped[str | None] = mapped_column(String(512))
     remote_policy: Mapped[str | None] = mapped_column(String(128))
     commitment: Mapped[str | None] = mapped_column(String(64))

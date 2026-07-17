@@ -2,6 +2,9 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 
+REM Keep Playwright browsers in the project so Cursor sandbox paths can't break launches.
+set "PLAYWRIGHT_BROWSERS_PATH=%~dp0.playwright-browsers"
+
 if exist ".venv\Scripts\python.exe" (
   set "PYTHON=.venv\Scripts\python.exe"
 ) else (
