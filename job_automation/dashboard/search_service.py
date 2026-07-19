@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 import sys
+import time
 from datetime import datetime
+from typing import Any
 
 from job_automation.browser.credentials import CredentialStore, PortalCredential
+from job_automation.browser.kasm_client import KasmConfig
 from job_automation.browser.portal_login import normalize_login_url
 from job_automation.paths import DATA_DIR, PROJECT_ROOT, ensure_dirs
 
@@ -42,12 +47,54 @@ def _process_alive(pid: int | None) -> bool:
         )
         return str(pid) in result.stdout
     try:
-        import os
-
         os.kill(pid, 0)
         return True
     except OSError:
         return False
+
+
+def _terminate_process(pid: int) -> None:
+    """Stop the search process and its children."""
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return
+
+    # Prefer process group (spawned with start_new_session=True).
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+    except PermissionError:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            return
+
+    for _ in range(30):
+        if not _process_alive(pid):
+            return
+        time.sleep(0.1)
+
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    except PermissionError:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
 
 
 def get_search_status() -> dict:
@@ -56,7 +103,8 @@ def get_search_status() -> dict:
         status["running"] = False
         if not status.get("finished_at"):
             status["finished_at"] = datetime.utcnow().isoformat()
-            status["error"] = status.get("error") or "Search process ended unexpectedly"
+            if not status.get("stopped"):
+                status["error"] = status.get("error") or "Search process ended unexpectedly"
         _write_status(status)
     return status
 
@@ -64,6 +112,35 @@ def get_search_status() -> dict:
 def reset_search_status() -> dict:
     _write_status({"running": False, "reset_at": datetime.utcnow().isoformat()})
     return get_search_status()
+
+
+def stop_search() -> dict:
+    """Stop a running search bot process (if any) and mark status as stopped."""
+    status = _read_status()
+    pid = status.get("pid")
+    was_running = bool(status.get("running")) or _process_alive(pid)
+
+    if pid and _process_alive(pid):
+        _terminate_process(int(pid))
+
+    status = _read_status()
+    status["running"] = False
+    status["stopped"] = True
+    status["finished_at"] = datetime.utcnow().isoformat()
+    status["kasm_sessions"] = []
+    # Clear hard error so the UI treats this as an intentional stop.
+    status.pop("error", None)
+    status["stop_message"] = "Stopped by user" if was_running else "No search was running"
+    status["updated_at"] = datetime.utcnow().isoformat()
+    _write_status(status)
+    return get_search_status()
+
+
+def update_search_kasm_sessions(sessions: list[dict[str, Any]]) -> None:
+    status = _read_status()
+    status["kasm_sessions"] = sessions
+    status["updated_at"] = datetime.utcnow().isoformat()
+    _write_status(status)
 
 
 def save_credentials_for_search(credentials: list[dict]) -> None:
@@ -97,6 +174,12 @@ def schedule_search(
     if invalid:
         raise ValueError(f"Unknown portals: {invalid}")
 
+    kasm = KasmConfig.from_env()
+    # When Kasm is enabled, Playwright drives remote Chrome via CDP — no local headful window.
+    if kasm.enabled:
+        headful = False
+        guest = False
+
     cmd = [sys.executable, "-m", "job_automation.main", "run"]
     if headful:
         cmd.append("--headful")
@@ -108,13 +191,16 @@ def schedule_search(
     ensure_dirs()
     log_file = open(LOG_PATH, "w", encoding="utf-8")
     creationflags = subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(PROJECT_ROOT),
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        creationflags=creationflags,
-    )
+    popen_kwargs: dict[str, Any] = {
+        "cwd": str(PROJECT_ROOT),
+        "stdout": log_file,
+        "stderr": subprocess.STDOUT,
+        "creationflags": creationflags,
+    }
+    if sys.platform != "win32":
+        # Own process group so Stop can terminate Playwright children cleanly.
+        popen_kwargs["start_new_session"] = True
+    proc = subprocess.Popen(cmd, **popen_kwargs)
     log_file.close()
 
     status = {
@@ -123,8 +209,11 @@ def schedule_search(
         "portals": portals,
         "headful": headful,
         "guest": guest,
+        "kasm_enabled": kasm.enabled,
+        "kasm_sessions": [],
         "found": 0,
         "saved": 0,
+        "stopped": False,
         "started_at": datetime.utcnow().isoformat(),
         "command": " ".join(cmd),
         "log_file": str(LOG_PATH),
@@ -137,6 +226,9 @@ def mark_search_finished(summary: dict | None = None, *, error: str | None = Non
     status = _read_status()
     status["running"] = False
     status["finished_at"] = datetime.utcnow().isoformat()
+    status["kasm_sessions"] = []
+    status.pop("stopped", None)
+    status.pop("stop_message", None)
     if summary is not None:
         status["summary"] = summary
         status["found"] = summary.get("found", status.get("found", 0))

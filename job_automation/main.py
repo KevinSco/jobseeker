@@ -7,13 +7,17 @@ import asyncio
 import sys
 
 import uvicorn
+from dotenv import load_dotenv
 
 from job_automation.config.loader import load_rules
 from job_automation.dashboard.app import create_app
 from job_automation.logging_config import setup_logging
 from job_automation.orchestration.runner import Orchestrator
 from job_automation.orchestration.scheduler import print_windows_task_scheduler_instructions
-from job_automation.paths import ensure_dirs
+from job_automation.paths import PROJECT_ROOT, ensure_dirs
+
+# Load .env from project root so KASM_* and other settings apply to CLI + dashboard.
+load_dotenv(PROJECT_ROOT / ".env")
 
 
 def build_parser() -> argparse.ArgumentParser:

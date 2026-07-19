@@ -104,6 +104,17 @@ def seeded_client():
         yield client
 
 
+def _ensure_signed_in(client: TestClient) -> None:
+    email = "e2e-bot@example.com"
+    password = "test-password-123"
+    signup = client.post("/api/auth/signup", json={"email": email, "password": password})
+    if signup.status_code == 409:
+        signed = client.post("/api/auth/signin", json={"email": email, "password": password})
+        assert signed.status_code == 200, signed.text
+    else:
+        assert signup.status_code == 200, signup.text
+
+
 def test_e2e_dashboard_home(seeded_client: TestClient):
     response = seeded_client.get("/")
     assert response.status_code == 200
@@ -153,6 +164,7 @@ def test_e2e_job_detail_and_patch(seeded_client: TestClient):
 
 
 def test_search_start_api(seeded_client: TestClient):
+    _ensure_signed_in(seeded_client)
     seeded_client.post("/api/search/reset")
     response = seeded_client.post(
         "/api/search/start",
@@ -173,6 +185,22 @@ def test_search_start_api(seeded_client: TestClient):
     data = response.json()
     assert data.get("running") is True
     assert "builtin" in data.get("portals", [])
+
+    stopped = seeded_client.post("/api/search/stop")
+    assert stopped.status_code == 200, stopped.text
+    stop_data = stopped.json()
+    assert stop_data.get("running") is False
+    assert stop_data.get("stopped") is True
+
+
+def test_search_stop_when_idle(seeded_client: TestClient):
+    _ensure_signed_in(seeded_client)
+    seeded_client.post("/api/search/reset")
+    response = seeded_client.post("/api/search/stop")
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("running") is False
+    assert data.get("stopped") is True
 
 
 def test_health_api(seeded_client: TestClient):

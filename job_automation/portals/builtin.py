@@ -257,9 +257,9 @@ class BuiltInWorker(BasePortalWorker):
                 "ul.dropdown-menu"
             ).first
             try:
-                await menu.wait_for(state="visible", timeout=5000)
+                await menu.wait_for(state="visible", timeout=1000)
             except Exception:
-                await page.wait_for_timeout(1200)
+                await page.wait_for_timeout(500)
 
             # Built In renders results as label.list-group-item-action inside the menu.
             option = page.locator(
@@ -386,7 +386,12 @@ class BuiltInWorker(BasePortalWorker):
             return None
         detail_url = detail_href if detail_href.startswith("http") else urljoin(BUILTIN_ORIGIN, detail_href)
         location = await self._card_text_match(card, r"(United States|USA|Remote|[A-Za-z ]+, [A-Z]{2})")
-        salary = await self._card_text_match(card, r"\$?\d[\d,]*K?(?:\s*-\s*\$?\d[\d,]*K?)?(?:\s*Annually)?")
+        # Prefer explicit salary shapes ($120K, 124K-209K Annually); avoid lone digits.
+        salary = await self._card_text_match(
+            card,
+            r"(?:\$\d[\d,]*(?:\.\d+)?(?:\s*-\s*\$?\d[\d,]*(?:\.\d+)?)?\s*K?(?:\s*Annually)?|"
+            r"\d{2,3}K(?:\s*-\s*\d{2,3}K)?(?:\s*Annually)?)",
+        )
         work_type = await self._card_work_type(card)
 
         industry = await self._expand_and_read_industry(card)
@@ -439,14 +444,19 @@ class BuiltInWorker(BasePortalWorker):
             job_card_title=detail.title or title,
             job_card_company=detail.company or company,
             company_url=company_url or detail.company_url,
+            company_headline=detail.company_headline,
             job_card_location=detail.location or location,
             job_card_salary=detail.salary_text or salary,
             job_card_url=detail_url,
             portal_job_url=detail.portal_job_url or detail_url,
             apply_url=detail.apply_url,
-            industry=industry,
-            work_type=work_type or detail.location,
-            top_skills=top_skills,
+            industry=detail.industry or industry,
+            work_type=detail.work_type or work_type,
+            experience_level=detail.experience_level,
+            posted_text=detail.posted_text,
+            top_skills=detail.skills_required or top_skills,
+            skills_required=detail.skills_required or top_skills,
+            match_background_text=detail.match_background_text,
             raw_html=detail.raw_html,
             description_text=detail.description_text,
         )
@@ -622,30 +632,158 @@ class BuiltInWorker(BasePortalWorker):
         return normalize_whitespace(match.group(0)) if match else None
 
     async def _extract_detail(self, page: Page, raw_job: RawJob) -> JobDetail:
-        title = await safe_inner_text(page, "h1, .job-title, [data-id='job-title']")
+        # Built In detail header is a 3-column row: company/title/posted | meta | industry/headline.
+        title = await safe_inner_text(page, "h1.fw-extrabold span, h1.fw-extrabold, h1, .job-title")
         company = await safe_inner_text(
-            page, "a[href*='/company/'], .company-title, [data-company], [data-id='company-title']"
+            page,
+            "a[href*='/company/'] h2, h2.text-pretty-blue, "
+            "a[href*='/company/'].text-pretty-blue, .company-title, [data-id='company-title']",
         )
-        location = await safe_inner_text(page, ".job-location, .location, [data-id='job-location']")
-        salary = await safe_inner_text(page, ".job-salary, .salary, [data-id='job-salary']")
-        work_type = await safe_inner_text(
-            page, "[data-id='job-remote'], .remote-badge, :text-matches('Remote|Hybrid', 'i')"
-        )
+        company_url = await self._detail_company_url(page) or raw_job.company_url
+        posted_text = await self._detail_posted_text(page)
+        location = await self._detail_icon_row_text(page, "fa-location-dot")
+        if not location:
+            location = await safe_inner_text(page, ".job-location, .location, [data-id='job-location']")
+        work_type = await self._detail_icon_row_text(page, "fa-house-building")
+        salary = await self._detail_icon_row_text(page, "fa-sack-dollar")
+        if not salary:
+            salary = await safe_inner_text(page, ".job-salary, .salary, [data-id='job-salary']")
+        experience_level = await self._detail_icon_row_text(page, "fa-trophy")
+        industry, company_headline = await self._detail_industry_and_headline(page)
         apply_url = await self.extract_apply_url(page)
-        description = await self.extract_description(page)
+        # Evidence sources on Built In detail:
+        # 1) job head (above), 2) match-background, 3) job-post-body-*, 4) Skills Required card.
+        body = await self.extract_description(page)
+        match_background = await self._detail_match_background(page)
+        skills_required, skills_text = await self._detail_skills_required(page)
+        description = "\n\n".join(
+            part for part in [body, match_background, skills_text] if part
+        ) or None
         return JobDetail(
             source_portal=self.portal_name,
             source_job_id=raw_job.source_job_id or extract_job_id_from_url(page.url),
             title=title or raw_job.job_card_title,
             company=company or raw_job.job_card_company,
-            company_url=raw_job.company_url,
+            company_url=company_url,
+            company_headline=company_headline,
             location=location or raw_job.job_card_location,
             salary_text=salary or raw_job.job_card_salary,
+            industry=industry or raw_job.industry,
+            work_type=work_type or raw_job.work_type,
+            experience_level=experience_level or raw_job.experience_level,
+            posted_text=posted_text or raw_job.posted_text,
+            skills_required=skills_required,
+            match_background_text=match_background,
             portal_job_url=page.url or raw_job.portal_job_url,
             apply_url=apply_url,
             raw_html=await page.content(),
             description_text=description,
         )
+
+    async def _detail_match_background(self, page: Page) -> str | None:
+        return await safe_inner_text(
+            page,
+            "div.match-background, .match-background, [class*='match-background']",
+        )
+
+    async def _detail_skills_required(self, page: Page) -> tuple[list[str], str | None]:
+        """Read the Skills Required white card on Built In detail."""
+        section = page.locator(
+            "div.bg-white.rounded-3.p-md:has-text('Skills Required'), "
+            "div.col-12.col-lg-6:has-text('Skills Required'), "
+            "div.bg-white.rounded-3.p-md.mb-sm.full-size:has-text('Skill')"
+        ).first
+        if await section.count() == 0:
+            return [], None
+        full_text = normalize_whitespace(await section.inner_text())
+        skills: list[str] = []
+        # Prefer chip/badge spans inside the skills card.
+        chips = section.locator(
+            "span.badge, span.rounded-pill, a.badge, "
+            "div.d-flex.flex-wrap span, li, "
+            "span.fw-semibold, span.fw-medium"
+        )
+        count = await chips.count()
+        for i in range(min(count, 40)):
+            text = normalize_whitespace(await chips.nth(i).inner_text())
+            if not text or len(text) > 60:
+                continue
+            lowered = text.lower()
+            if lowered in {"skills required", "skill required", "skills", "required"}:
+                continue
+            if text not in skills:
+                skills.append(text)
+        if not skills and full_text:
+            # Fallback: split on bullets / commas after the heading.
+            payload = re.sub(r"(?i)^skills?\s*required[:\s]*", "", full_text).strip()
+            for part in re.split(r"[•·|,/\n]+", payload):
+                token = normalize_whitespace(part)
+                if token and len(token) < 60 and token.lower() not in {"skills required", "required"}:
+                    skills.append(token)
+        return skills, full_text
+
+    async def _detail_company_url(self, page: Page) -> str | None:
+        link = page.locator("a[href*='/company/']").first
+        if await link.count() == 0:
+            return None
+        href = await link.get_attribute("href")
+        if not href:
+            return None
+        if href.startswith("http"):
+            return href
+        return urljoin(BUILTIN_ORIGIN, href)
+
+    async def _detail_posted_text(self, page: Page) -> str | None:
+        posted = await safe_inner_text(
+            page,
+            "i.fa-clock ~ span.font-barlow, span.font-barlow:text-matches('Posted', 'i')",
+        )
+        if posted:
+            return posted
+        clock = page.locator("i.fa-clock, i[class*='fa-clock']").first
+        if await clock.count() == 0:
+            return None
+        title = await clock.get_attribute("title")
+        if not title:
+            return None
+        text = title.strip()
+        if text.lower().startswith("job "):
+            text = text[4:]
+        return normalize_whitespace(text)
+
+    async def _detail_icon_row_text(self, page: Page, icon_fragment: str) -> str | None:
+        icon = page.locator(f"i[class*='{icon_fragment}']").first
+        if await icon.count() == 0:
+            return None
+        row = icon.locator(
+            "xpath=ancestor::div[contains(@class,'d-flex') and contains(@class,'align-items-start')][1]"
+        )
+        if await row.count() == 0:
+            row = icon.locator("xpath=ancestor::div[contains(@class,'d-flex')][1]")
+        if await row.count() == 0:
+            return None
+        # Prefer the text container (may include nested spans like location).
+        text_node = row.locator(".font-barlow, span.font-barlow").first
+        if await text_node.count() == 0:
+            text_node = row.locator("span").last
+        if await text_node.count():
+            text = normalize_whitespace(await text_node.inner_text())
+            if text:
+                return text
+        return normalize_whitespace(await row.inner_text())
+
+    async def _detail_industry_and_headline(self, page: Page) -> tuple[str | None, str | None]:
+        industry = await safe_inner_text(page, "div.font-barlow.fw-medium.mb-md, div.font-barlow.fw-medium")
+        if industry and "•" not in industry and "·" not in industry:
+            # Avoid grabbing unrelated medium-weight Barlow text.
+            industry = None
+        headline = await safe_inner_text(
+            page,
+            "div.bg-white.rounded-3.p-md.h-100 > div.fs-md.fw-regular, "
+            "div.font-barlow.fw-medium.mb-md + div.fs-md.fw-regular, "
+            "div.fw-medium.mb-md + div.fs-md.fw-regular",
+        )
+        return industry, headline
 
     async def _go_next_page(self, page: Page) -> bool:
         next_btn = page.locator(

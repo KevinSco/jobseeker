@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Watch {{ label }} · JobSeek</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  {# KasmVNC sets COOP/COEP which blocks cross-origin iframes from the dashboard.
+     Open the viewer top-level after JobSeek auth instead. #}
+  <meta http-equiv="refresh" content="0;url={{ embed_url }}">
+</head>
+<body class="watch-page">
+  <header class="watch-bar">
+    <a class="watch-back" href="/">← Dashboard</a>
+    <div class="watch-title">Opening live browser · {{ label }}</div>
+    <div class="watch-user muted">{{ user_email }}</div>
+  </header>
+  <main class="watch-redirect">
+    <p>Opening the live bot browser…</p>
+    <p class="muted">
+      If nothing happens, accept the self-signed certificate warning, then return here.
+    </p>
+    <p>
+      <a class="primary-btn" href="{{ embed_url }}" rel="noopener noreferrer">Open live browser</a>
+    </p>
+    <p class="watch-hint muted">
+      Viewer URL: <a href="{{ embed_url }}" rel="noopener noreferrer">{{ embed_url }}</a>
+    </p>
+  </main>
+  <script>
+    // Prefer JS navigation so we stay in the same tab after auth.
+    window.setTimeout(function () {
+      window.location.replace({{ embed_url|tojson }});
+    }, 50);
+  </script>
+</body>
+</html>

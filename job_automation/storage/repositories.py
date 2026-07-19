@@ -6,7 +6,7 @@ import json
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Select, delete, func, or_, select, update
+from sqlalchemy import Select, case, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from job_automation.models.domain import Decision, Evidence, NormalizedJob, PortalRunStatus
@@ -30,8 +30,10 @@ def job_row_to_normalized(row: JobRow) -> NormalizedJob:
         title=row.title,
         company=row.company,
         company_url=row.company_url,
+        company_headline=row.company_headline,
         location=row.location,
         remote_policy=row.remote_policy,
+        work_type=row.work_type,
         commitment=row.commitment,
         experience_level=row.experience_level,
         industry=row.industry,
@@ -40,6 +42,7 @@ def job_row_to_normalized(row: JobRow) -> NormalizedJob:
         salary_max_annual=row.salary_max_annual,
         salary_min_hourly=row.salary_min_hourly,
         salary_max_hourly=row.salary_max_hourly,
+        posted_text=row.posted_text,
         security_clearance_required=row.security_clearance_required,
         travel_required=row.travel_required,
         security_related_company_or_role=row.security_related_company_or_role,
@@ -118,8 +121,10 @@ class JobRepository:
         row.title = job.title
         row.company = job.company
         row.company_url = job.company_url
+        row.company_headline = job.company_headline
         row.location = job.location
         row.remote_policy = job.remote_policy
+        row.work_type = job.work_type
         row.commitment = job.commitment
         row.experience_level = job.experience_level
         row.industry = job.industry
@@ -128,6 +133,7 @@ class JobRepository:
         row.salary_max_annual = job.salary_max_annual
         row.salary_min_hourly = job.salary_min_hourly
         row.salary_max_hourly = job.salary_max_hourly
+        row.posted_text = job.posted_text
         row.security_clearance_required = job.security_clearance_required
         row.travel_required = job.travel_required
         row.security_related_company_or_role = job.security_related_company_or_role
@@ -194,9 +200,10 @@ class JobRepository:
         decision: list[str] | None = None,
         portal: str | None = None,
         show_hidden: bool = False,
+        sort: str = "relevance",
         page: int = 1,
         page_size: int = 20,
-    ) -> tuple[list[JobRow], int]:
+    ) -> tuple[list[JobRow], int, int]:
         stmt: Select[tuple[JobRow]] = select(JobRow)
         if decision:
             stmt = stmt.where(JobRow.decision.in_(decision))
@@ -216,11 +223,54 @@ class JobRepository:
                     JobRow.description_text.ilike(pattern),
                 )
             )
+
         count_stmt = select(func.count()).select_from(stmt.subquery())
         total = (await self.session.execute(count_stmt)).scalar_one()
-        stmt = stmt.order_by(JobRow.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
+
+        filtered = stmt.subquery()
+        companies_stmt = select(func.count(func.distinct(filtered.c.company)))
+        companies_count = (await self.session.execute(companies_stmt)).scalar_one() or 0
+
+        salary_rank = func.coalesce(
+            JobRow.salary_max_annual,
+            JobRow.salary_min_annual,
+            (JobRow.salary_max_hourly * 2080),
+            (JobRow.salary_min_hourly * 2080),
+            0,
+        )
+        sort_key = (sort or "relevance").strip().lower()
+        if sort_key in {"recent", "most_recent", "newest"}:
+            order = (JobRow.created_at.desc(), JobRow.id.desc())
+        elif sort_key in {"oldest", "oldest_first"}:
+            order = (JobRow.created_at.asc(), JobRow.id.asc())
+        elif sort_key in {"salary_high", "highest_salary"}:
+            order = (salary_rank.desc(), JobRow.created_at.desc(), JobRow.id.desc())
+        elif sort_key in {"salary_low", "lowest_salary"}:
+            order = (salary_rank.asc(), JobRow.created_at.desc(), JobRow.id.desc())
+        elif sort_key in {"experience_least", "least_experience"}:
+            order = (
+                JobRow.experience_level.asc().nulls_last(),
+                JobRow.created_at.desc(),
+                JobRow.id.desc(),
+            )
+        elif sort_key in {"experience_most", "most_experience"}:
+            order = (
+                JobRow.experience_level.desc().nulls_last(),
+                JobRow.created_at.desc(),
+                JobRow.id.desc(),
+            )
+        else:
+            # Relevance: prefer eligible, then needs_review, then newer.
+            decision_rank = case(
+                (JobRow.decision == Decision.ELIGIBLE.value, 0),
+                (JobRow.decision == Decision.NEEDS_REVIEW.value, 1),
+                else_=2,
+            )
+            order = (decision_rank.asc(), JobRow.created_at.desc(), JobRow.id.desc())
+
+        stmt = stmt.order_by(*order).offset((page - 1) * page_size).limit(page_size)
         rows = (await self.session.execute(stmt)).scalars().all()
-        return list(rows), total
+        return list(rows), int(total), int(companies_count)
 
     async def update_job(self, job_id: int, **fields: Any) -> JobRow | None:
         row = await self.get_job(job_id)

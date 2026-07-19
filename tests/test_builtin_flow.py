@@ -284,3 +284,32 @@ def test_role_match_accepts_sr_and_senior_software_titles():
     ]:
         result = parse_role_match(title, config.target_roles)
         assert result.value is True, title
+
+
+def test_transform_prefers_builtin_detail_header_fields():
+    config = load_rules()
+    raw = RawJob(
+        source_portal="builtin",
+        job_card_title="Software Development Engineer/Features Engineering Lead Basemaps Team",
+        job_card_company="Vantor",
+        company_url="https://builtin.com/company/vantor",
+        company_headline="Vantor is forging the new frontier of spatial intelligence to unlock a more autonomous, interoperable world.",
+        job_card_location="Hiring Remotely in Westminster, CO, USA",
+        job_card_salary="124K-209K Annually",
+        industry="Aerospace • Artificial Intelligence • Computer Vision • Software • Analytics • Defense • Big Data Analytics",
+        work_type="In-Office or Remote",
+        experience_level="Senior level",
+        posted_text="Posted 9 Hours Ago",
+        portal_job_url="https://builtin.com/job/software-development-engineerfeatures-engineering-lead-basemaps-team/123",
+        description_text="Build basemap features.",
+        apply_url="https://example.com/apply",
+    )
+    normalized = transform_raw_job(raw, config)
+    assert normalized.company_headline and "spatial intelligence" in normalized.company_headline
+    assert normalized.work_type == "In-Office or Remote"
+    assert normalized.experience_level == "Senior Level"
+    assert normalized.posted_text == "Posted 9 Hours Ago"
+    assert normalized.salary_min_annual == 124000
+    assert normalized.salary_max_annual == 209000
+    assert normalized.remote_policy == "hybrid_possible_remote"
+    assert "Aerospace" in (normalized.industry or "")

@@ -21,16 +21,19 @@ class JobRow(Base):
     title: Mapped[str | None] = mapped_column(String(512))
     company: Mapped[str | None] = mapped_column(String(512))
     company_url: Mapped[str | None] = mapped_column(Text)
+    company_headline: Mapped[str | None] = mapped_column(Text)
     location: Mapped[str | None] = mapped_column(String(512))
     remote_policy: Mapped[str | None] = mapped_column(String(128))
+    work_type: Mapped[str | None] = mapped_column(String(128))
     commitment: Mapped[str | None] = mapped_column(String(64))
     experience_level: Mapped[str | None] = mapped_column(String(64))
-    industry: Mapped[str | None] = mapped_column(String(256))
+    industry: Mapped[str | None] = mapped_column(String(512))
     salary_text: Mapped[str | None] = mapped_column(String(256))
     salary_min_annual: Mapped[int | None] = mapped_column(Integer)
     salary_max_annual: Mapped[int | None] = mapped_column(Integer)
     salary_min_hourly: Mapped[float | None] = mapped_column(Float)
     salary_max_hourly: Mapped[float | None] = mapped_column(Float)
+    posted_text: Mapped[str | None] = mapped_column(String(128))
     security_clearance_required: Mapped[bool | None] = mapped_column(Boolean)
     travel_required: Mapped[bool | None] = mapped_column(Boolean)
     security_related_company_or_role: Mapped[bool | None] = mapped_column(Boolean)
@@ -91,4 +94,13 @@ class BannedCompanyRow(Base):
     company_name: Mapped[str] = mapped_column(String(512), unique=True, index=True)
     company_name_normalized: Mapped[str] = mapped_column(String(512), unique=True, index=True)
     reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class UserRow(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(256))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

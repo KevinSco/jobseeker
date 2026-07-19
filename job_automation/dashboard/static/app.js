@@ -31,15 +31,21 @@ const jobsSearchInput = document.getElementById("jobs-search-input");
 const homeSearchForm = document.getElementById("home-search-form");
 const homeSearchInput = document.getElementById("home-search-input");
 const jobsPortalFilter = document.getElementById("jobs-portal-filter");
-const jobsCount = document.getElementById("jobs-count");
-const jobsListTitle = document.getElementById("jobs-list-title");
+const jobsSort = document.getElementById("jobs-sort");
+const jobsSortTrigger = document.getElementById("jobs-sort-trigger");
+const jobsSortMenu = document.getElementById("jobs-sort-menu");
+const jobsSortLabel = document.getElementById("jobs-sort-label");
+const jobsTotalCount = document.getElementById("jobs-total-count");
+const jobsCompanyCount = document.getElementById("jobs-company-count");
 const jobsSelectBar = document.getElementById("jobs-select-bar");
 const jobsSelectCount = document.getElementById("jobs-select-count");
 const selectAllJobsBtn = document.getElementById("select-all-jobs");
 const cancelJobsSelectBtn = document.getElementById("cancel-jobs-select");
 const deleteSelectedJobsBtn = document.getElementById("delete-selected-jobs");
 const runStatus = document.getElementById("run-status");
+const kasmLinks = document.getElementById("kasm-links");
 const findJobsBtn = document.getElementById("find-jobs-btn");
+const stopJobsBtn = document.getElementById("stop-jobs-btn");
 const clearJobsBtn = document.getElementById("clear-jobs-btn");
 const findJobsModal = document.getElementById("find-jobs-modal");
 const findPortals = document.getElementById("find-portals");
@@ -48,8 +54,15 @@ const homeView = document.getElementById("home-view");
 const jobsView = document.getElementById("jobs-view");
 const runsView = document.getElementById("runs-view");
 const settingsView = document.getElementById("settings-view");
+const authModal = document.getElementById("auth-modal");
+const authForm = document.getElementById("auth-form");
+const authSlot = document.getElementById("auth-slot");
+const signinBtn = document.getElementById("signin-btn");
 
 let logPollTimer = null;
+let currentUser = null;
+let authMode = "signin";
+let authNextAction = null;
 
 const DECISION_LABELS = {
   eligible: "Enable",
@@ -87,6 +100,50 @@ jobsPortalFilter.addEventListener("change", () => {
   loadJobs();
 });
 
+function closeJobsSortMenu() {
+  jobsSortMenu?.classList.add("hidden");
+  jobsSortTrigger?.setAttribute("aria-expanded", "false");
+}
+
+function openJobsSortMenu() {
+  jobsSortMenu?.classList.remove("hidden");
+  jobsSortTrigger?.setAttribute("aria-expanded", "true");
+}
+
+function setJobsSort(value, { reload = true } = {}) {
+  const option = document.querySelector(`.jobs-sort-option[data-value="${value}"]`);
+  if (!option || !jobsSort) return;
+  jobsSort.value = value;
+  if (jobsSortLabel) jobsSortLabel.textContent = option.textContent.trim();
+  document.querySelectorAll(".jobs-sort-option").forEach((el) => {
+    const active = el === option;
+    el.classList.toggle("active", active);
+    el.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  closeJobsSortMenu();
+  if (reload) {
+    currentPage = 1;
+    loadJobs();
+  }
+}
+
+jobsSortTrigger?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  if (jobsSortMenu?.classList.contains("hidden")) openJobsSortMenu();
+  else closeJobsSortMenu();
+});
+
+document.querySelectorAll(".jobs-sort-option").forEach((option) => {
+  option.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setJobsSort(option.dataset.value || "relevance");
+  });
+});
+
+document.addEventListener("click", (event) => {
+  if (!event.target.closest("#jobs-sort-wrap")) closeJobsSortMenu();
+});
+
 document.querySelectorAll("#decision-chips .chip").forEach((chip) => {
   chip.addEventListener("click", () => {
     document.querySelectorAll("#decision-chips .chip").forEach((el) => el.classList.remove("active"));
@@ -102,7 +159,6 @@ document.querySelectorAll(".entity-toggle .toggle-btn").forEach((btn) => {
     document.querySelectorAll(".entity-toggle .toggle-btn").forEach((el) => el.classList.remove("active"));
     btn.classList.add("active");
     activeEntity = btn.dataset.entity;
-    jobsListTitle.textContent = activeEntity === "companies" ? "Companies" : "Positions";
     currentPage = 1;
     loadJobs();
   });
@@ -151,12 +207,59 @@ logSource?.addEventListener("change", () => {
 });
 
 findJobsBtn.addEventListener("click", async () => {
-  await loadCredentials();
-  renderFindPortalsModal();
-  findJobsModal.classList.remove("hidden");
+  const ok = await requireAuth({
+    reason: "Sign in to run Find Jobs and watch the live bot browser (Kasm).",
+    nextAction: "find-jobs",
+  });
+  if (!ok) return;
+  await openFindJobsModal();
+});
+
+stopJobsBtn?.addEventListener("click", async () => {
+  const ok = await requireAuth({
+    reason: "Sign in to stop the running bot.",
+    nextAction: null,
+  });
+  if (!ok) return;
+  const confirmed = await showAppConfirm({
+    title: "Stop the bot?",
+    message: "This ends the current Find Jobs run. Jobs already saved will stay in the database.",
+    confirmLabel: "Stop bot",
+    cancelLabel: "Keep running",
+    danger: true,
+  });
+  if (!confirmed) return;
+  stopJobsBtn.disabled = true;
+  setRunStatus("Stopping bot...", true);
+  if (searchPollTimer) {
+    clearInterval(searchPollTimer);
+    searchPollTimer = null;
+  }
+  const response = await fetch("/api/search/stop", { method: "POST" });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    stopJobsBtn.disabled = false;
+    showCredentialToast(err.detail || "Failed to stop bot", "error");
+    pollSearchStatus();
+    return;
+  }
+  const status = await response.json();
+  setSearchControls(false);
+  renderKasmLinks([]);
+  if (runsView?.classList.contains("hidden")) {
+    stopLogPolling();
+  }
+  setRunStatus(status.stop_message || "Stopped", false);
+  await loadRuns();
+  await loadJobs();
 });
 
 clearJobsBtn?.addEventListener("click", async () => {
+  const authed = await requireAuth({
+    reason: "Sign in to clear collected jobs.",
+    nextAction: null,
+  });
+  if (!authed) return;
   const ok = await showAppConfirm({
     title: "Clear all jobs?",
     message: "Delete all collected jobs, sources, and run history from the database?",
@@ -173,6 +276,7 @@ clearJobsBtn?.addEventListener("click", async () => {
     }
     const data = await response.json();
     selectedJobId = null;
+    closeJobDetailDrawer();
     jobDetail.innerHTML = `<div class="job-detail empty">Select a job to view evidence and links.</div>`;
     await loadJobs();
     await loadRuns();
@@ -193,6 +297,148 @@ document.getElementById("go-settings-btn").addEventListener("click", () => {
 });
 
 document.getElementById("confirm-find-jobs").addEventListener("click", startFindJobs);
+
+signinBtn?.addEventListener("click", () => {
+  openAuthModal({ reason: "Sign in to run the bot and watch Kasm browsers." });
+});
+
+document.getElementById("auth-cancel")?.addEventListener("click", () => {
+  closeAuthModal();
+});
+
+document.querySelectorAll(".auth-tab").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    setAuthMode(tab.dataset.authTab || "signin");
+  });
+});
+
+authForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await submitAuthForm();
+});
+
+async function openFindJobsModal() {
+  await loadCredentials();
+  renderFindPortalsModal();
+  findJobsModal.classList.remove("hidden");
+}
+
+async function loadAuth() {
+  try {
+    const response = await fetch("/api/auth/me");
+    const data = await response.json();
+    currentUser = data.authenticated ? data.user : null;
+  } catch {
+    currentUser = null;
+  }
+  renderAuthSlot();
+  return Boolean(currentUser);
+}
+
+function renderAuthSlot() {
+  if (!authSlot) return;
+  if (currentUser) {
+    authSlot.innerHTML = `
+      <span class="auth-user" title="${escapeHtml(currentUser.email)}">${escapeHtml(currentUser.email)}</span>
+      <button id="signout-btn" class="secondary-btn" type="button">Sign out</button>
+    `;
+    document.getElementById("signout-btn")?.addEventListener("click", async () => {
+      await fetch("/api/auth/signout", { method: "POST" });
+      currentUser = null;
+      renderAuthSlot();
+      renderKasmLinks([]);
+      showCredentialToast("Signed out.", "success");
+    });
+    return;
+  }
+  authSlot.innerHTML = `<button id="signin-btn" class="secondary-btn" type="button">Sign in</button>`;
+  document.getElementById("signin-btn")?.addEventListener("click", () => {
+    openAuthModal({ reason: "Sign in to run the bot and watch Kasm browsers." });
+  });
+}
+
+function openAuthModal({ reason, nextAction = null } = {}) {
+  authNextAction = nextAction;
+  const reasonEl = document.getElementById("auth-modal-reason");
+  if (reasonEl && reason) reasonEl.textContent = reason;
+  setAuthMode("signin");
+  const errorEl = document.getElementById("auth-error");
+  if (errorEl) {
+    errorEl.textContent = "";
+    errorEl.classList.add("hidden");
+  }
+  authModal?.classList.remove("hidden");
+  authModal?.setAttribute("aria-hidden", "false");
+  document.getElementById("auth-email")?.focus();
+}
+
+function closeAuthModal() {
+  authModal?.classList.add("hidden");
+  authModal?.setAttribute("aria-hidden", "true");
+  authNextAction = null;
+}
+
+function setAuthMode(mode) {
+  authMode = mode === "signup" ? "signup" : "signin";
+  document.querySelectorAll(".auth-tab").forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.authTab === authMode);
+  });
+  const title = document.getElementById("auth-modal-title");
+  const submit = document.getElementById("auth-submit");
+  const password = document.getElementById("auth-password");
+  if (title) {
+    title.textContent = authMode === "signup" ? "Create your account" : "Sign in to use the bot";
+  }
+  if (submit) submit.textContent = authMode === "signup" ? "Sign up" : "Sign in";
+  if (password) {
+    password.autocomplete = authMode === "signup" ? "new-password" : "current-password";
+  }
+}
+
+async function submitAuthForm() {
+  const email = document.getElementById("auth-email")?.value.trim() || "";
+  const password = document.getElementById("auth-password")?.value || "";
+  const errorEl = document.getElementById("auth-error");
+  const endpoint = authMode === "signup" ? "/api/auth/signup" : "/api/auth/signin";
+  const submit = document.getElementById("auth-submit");
+  if (submit) submit.disabled = true;
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(typeof data.detail === "string" ? data.detail : "Authentication failed");
+    }
+    currentUser = data.user;
+    renderAuthSlot();
+    const next = authNextAction;
+    closeAuthModal();
+    showCredentialToast(authMode === "signup" ? "Account created." : "Signed in.", "success");
+    if (next === "find-jobs") {
+      await openFindJobsModal();
+    } else if (typeof next === "string" && next.startsWith("/")) {
+      window.location.href = next;
+    }
+  } catch (error) {
+    if (errorEl) {
+      errorEl.textContent = error.message || "Authentication failed";
+      errorEl.classList.remove("hidden");
+    }
+  } finally {
+    if (submit) submit.disabled = false;
+  }
+}
+
+async function requireAuth({ reason, nextAction = null } = {}) {
+  if (currentUser) return true;
+  await loadAuth();
+  if (currentUser) return true;
+  openAuthModal({ reason, nextAction });
+  return false;
+}
 
 async function loadRuns() {
   const response = await fetch("/api/runs?limit=20");
@@ -265,7 +511,8 @@ function stopLogPolling() {
 async function loadJobs() {
   const params = new URLSearchParams({
     page: String(currentPage),
-    page_size: "15",
+    page_size: "48",
+    sort: jobsSort?.value || "relevance",
   });
   const q = jobsSearchInput.value.trim();
   if (q) params.set("q", q);
@@ -280,18 +527,27 @@ async function loadJobs() {
 
   const response = await fetch(`/api/jobs?${params.toString()}`);
   const data = await response.json();
-  jobsCount.textContent = `${data.total} result${data.total === 1 ? "" : "s"}`;
+  const total = Number(data.total || 0);
+  const companies = Number(data.companies || 0);
+  if (jobsTotalCount) jobsTotalCount.textContent = formatCount(total);
+  if (jobsCompanyCount) jobsCompanyCount.textContent = formatCount(companies);
   visibleJobIds = (data.jobs || []).map((job) => Number(job.id));
 
   if (activeEntity === "companies") {
-    jobsList.innerHTML = renderJobsByCompany(data.jobs) || "<div class='muted'>No jobs found.</div>";
+    jobsList.className = "jobs-companies";
+    jobsList.innerHTML = renderJobsByCompany(data.jobs) || "<div class='muted jobs-empty'>No jobs found.</div>";
   } else {
-    jobsList.innerHTML = data.jobs.map(renderJobCard).join("") || "<div class='muted'>No jobs found.</div>";
+    jobsList.className = "jobs-grid";
+    jobsList.innerHTML = data.jobs.map(renderJobCard).join("") || "<div class='muted jobs-empty'>No jobs found.</div>";
   }
 
   renderPagination(data.total, data.page, data.page_size);
   bindJobCards();
   updateSelectBar();
+}
+
+function formatCount(value) {
+  return Number(value || 0).toLocaleString();
 }
 
 function renderJobsByCompany(jobs) {
@@ -307,7 +563,9 @@ function renderJobsByCompany(jobs) {
       ([company, items]) => `
       <div class="company-group">
         <h3 class="company-group-title">${escapeHtml(company)} · ${items.length}</h3>
-        ${items.map(renderJobCard).join("")}
+        <div class="jobs-grid">
+          ${items.map(renderJobCard).join("")}
+        </div>
       </div>`
     )
     .join("");
@@ -317,13 +575,72 @@ function decisionLabel(decision) {
   return DECISION_LABELS[decision] || decision || "Unknown";
 }
 
+function companyInitials(name) {
+  const parts = String(name || "?")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!parts.length) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+}
+
+function relativeTime(iso) {
+  if (!iso) return "";
+  // Backend stores UTC without a timezone suffix; treat naive ISO as UTC.
+  let normalized = String(iso).trim();
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(normalized) && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(normalized)) {
+    normalized = normalized.replace(" ", "T");
+    if (!normalized.endsWith("Z")) normalized += "Z";
+  }
+  const then = new Date(normalized).getTime();
+  if (Number.isNaN(then)) return "";
+  const diffSec = Math.max(0, Math.floor((Date.now() - then) / 1000));
+  if (diffSec < 60) return `${Math.max(diffSec, 1)}s`;
+  const mins = Math.floor(diffSec / 60);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 48) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 14) return `${days}d`;
+  return new Date(normalized).toLocaleDateString();
+}
+
 function renderJobCard(job) {
   const checked = selectedJobIds.has(job.id);
   const selectedClass = selectedJobId === job.id && !selectionMode ? "selected" : "";
   const checkedClass = checked ? "checked" : "";
   const selectClass = selectionMode ? "select-mode" : "";
+  const company = job.company || "Unknown company";
+  const location = job.location || "Remote / Unknown";
+  const salary = job.salary_text || "";
+  const workType = job.work_type || "";
+  const level = job.experience_level || "";
+  const remote = job.remote_policy || "";
+  const reason = job.decision_reason || "";
+  const postingUrl = job.apply_url || job.job_url || "";
+  const posted = job.posted_text || relativeTime(job.created_at);
+  const headline = job.company_headline || "";
+  const industry = job.industry || "";
+
+  const tags = [];
+  if (salary) tags.push(`<span class="job-tag salary">${escapeHtml(salary)}</span>`);
+  if (workType) tags.push(`<span class="job-tag">${escapeHtml(workType)}</span>`);
+  else if (remote) tags.push(`<span class="job-tag">${escapeHtml(remote)}</span>`);
+  if (level) tags.push(`<span class="job-tag">${escapeHtml(level)}</span>`);
+  if (job.decision) {
+    tags.push(
+      `<span class="job-tag decision ${escapeHtml(job.decision)}">${escapeHtml(decisionLabel(job.decision))}</span>`
+    );
+  }
+  if (job.source_portal) {
+    tags.push(`<span class="job-tag portal">${escapeHtml(PORTAL_LABELS[job.source_portal] || job.source_portal)}</span>`);
+  }
+
+  const companySub = headline || industry || (job.source_portal ? PORTAL_LABELS[job.source_portal] || job.source_portal : "Collected role");
+
   return `
-    <div class="job-card ${selectedClass} ${checkedClass} ${selectClass}" data-job-id="${job.id}">
+    <article class="job-card ${selectedClass} ${checkedClass} ${selectClass}" data-job-id="${job.id}">
       ${
         selectionMode
           ? `<label class="job-select" onclick="event.stopPropagation()">
@@ -331,13 +648,44 @@ function renderJobCard(job) {
             </label>`
           : ""
       }
-      <div class="job-card-body">
-        <div class="job-title">${escapeHtml(job.title || "Untitled")}</div>
-        <div class="job-meta">${escapeHtml(job.company || "Unknown company")} · ${escapeHtml(job.source_portal || "")}</div>
-        <div class="job-meta">${escapeHtml(job.location || "Remote/Unknown")} · ${escapeHtml(job.salary_text || "Salary N/A")}</div>
-        <div style="margin-top:8px"><span class="badge ${job.decision || ""}">${escapeHtml(decisionLabel(job.decision))}</span></div>
+      <div class="job-card-top">
+        <h3 class="job-title">${escapeHtml(job.title || "Untitled")}</h3>
+        ${posted ? `<span class="job-posted">${escapeHtml(posted)}</span>` : ""}
       </div>
-    </div>
+      <div class="job-location">
+        <span class="job-location-icon" aria-hidden="true"></span>
+        <span>${escapeHtml(location)}</span>
+      </div>
+      ${tags.length ? `<div class="job-tags">${tags.join("")}</div>` : ""}
+      <div class="job-company">
+        <div class="job-company-avatar" aria-hidden="true">${escapeHtml(companyInitials(company))}</div>
+        <div class="job-company-meta">
+          <div class="job-company-name">${escapeHtml(company)}</div>
+          <div class="job-company-sub">${escapeHtml(companySub)}</div>
+        </div>
+      </div>
+      ${
+        reason
+          ? `<p class="job-snippet"><span class="job-snippet-icon" aria-hidden="true"></span>${escapeHtml(reason)}</p>`
+          : ""
+      }
+      <div class="job-card-footer">
+        ${
+          postingUrl
+            ? `<a class="job-posting-link" href="${escapeHtml(postingUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">Job Posting</a>`
+            : `<span class="muted">No posting link</span>`
+        }
+        <button type="button" class="job-view-btn" data-job-id="${job.id}">View details</button>
+      </div>
+      <div class="job-card-actions" aria-hidden="true">
+        <button type="button" class="job-action primary job-view-btn" data-job-id="${job.id}">View details</button>
+        ${
+          postingUrl
+            ? `<a class="job-action" href="${escapeHtml(postingUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">Apply Directly</a>`
+            : ""
+        }
+      </div>
+    </article>
   `;
 }
 
@@ -429,6 +777,7 @@ function bindJobCards() {
     card.addEventListener("touchcancel", clearPress);
 
     card.addEventListener("click", async (event) => {
+      if (event.target.closest("a, .job-select, .job-action")) return;
       if (longPressTriggered) {
         longPressTriggered = false;
         return;
@@ -440,14 +789,45 @@ function bindJobCards() {
       }
       selectedJobId = jobId;
       await loadJobDetail(selectedJobId);
-      loadJobs();
+      document.querySelectorAll(".job-card.selected").forEach((el) => el.classList.remove("selected"));
+      card.classList.add("selected");
     });
 
     card.querySelector(".job-select-input")?.addEventListener("change", (event) => {
       toggleJobSelection(jobId, event.target.checked);
     });
   });
+
+  document.querySelectorAll(".job-view-btn").forEach((btn) => {
+    btn.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (selectionMode) return;
+      const jobId = Number(btn.dataset.jobId);
+      selectedJobId = jobId;
+      await loadJobDetail(jobId);
+      document.querySelectorAll(".job-card.selected").forEach((el) => el.classList.remove("selected"));
+      document.querySelector(`.job-card[data-job-id="${jobId}"]`)?.classList.add("selected");
+    });
+  });
 }
+
+function openJobDetailDrawer() {
+  const drawer = document.getElementById("job-detail-drawer");
+  if (!drawer) return;
+  drawer.classList.remove("hidden");
+  drawer.setAttribute("aria-hidden", "false");
+}
+
+function closeJobDetailDrawer() {
+  const drawer = document.getElementById("job-detail-drawer");
+  if (!drawer) return;
+  drawer.classList.add("hidden");
+  drawer.setAttribute("aria-hidden", "true");
+}
+
+document.getElementById("close-job-detail")?.addEventListener("click", closeJobDetailDrawer);
+document.getElementById("job-detail-backdrop")?.addEventListener("click", closeJobDetailDrawer);
 
 cancelJobsSelectBtn?.addEventListener("click", () => exitSelectionMode());
 selectAllJobsBtn?.addEventListener("click", () => selectAllVisibleJobs());
@@ -466,6 +846,14 @@ async function loadJobDetail(jobId) {
     )
     .join("");
 
+  const metaBits = [
+    job.location,
+    job.work_type,
+    job.experience_level,
+    job.salary_text,
+    job.posted_text,
+  ].filter(Boolean);
+
   jobDetail.innerHTML = `
     <div class="job-title">${escapeHtml(job.title || "Untitled")}</div>
     <div class="job-meta">
@@ -474,8 +862,10 @@ async function loadJobDetail(jobId) {
           ? `<a href="${escapeHtml(job.company_url)}" target="_blank" rel="noopener">${escapeHtml(job.company || "Company")}</a>`
           : escapeHtml(job.company || "")
       }
-      · ${escapeHtml(job.location || "")}
+      ${metaBits.length ? ` · ${escapeHtml(metaBits.join(" · "))}` : ""}
     </div>
+    ${job.industry ? `<div class="job-meta">${escapeHtml(job.industry)}</div>` : ""}
+    ${job.company_headline ? `<p class="job-headline">${escapeHtml(job.company_headline)}</p>` : ""}
     <div style="margin:8px 0"><span class="badge ${job.decision || ""}">${escapeHtml(decisionLabel(job.decision))}</span></div>
     <p>${escapeHtml(job.decision_reason || "")}</p>
     <div class="detail-actions">
@@ -499,6 +889,7 @@ async function loadJobDetail(jobId) {
     selectedJobIds.add(job.id);
     deleteSelectedJobs();
   });
+  openJobDetailDrawer();
 }
 
 async function deleteSelectedJobs() {
@@ -534,6 +925,7 @@ async function deleteSelectedJobs() {
   if (ids.includes(selectedJobId)) {
     selectedJobId = null;
     jobDetail.innerHTML = "<div class='muted'>Select a job to inspect evidence and decisions.</div>";
+    closeJobDetailDrawer();
   }
   exitSelectionMode();
   showCredentialToast(`Deleted ${data.jobs_deleted || ids.length} job(s).`, "success");
@@ -950,14 +1342,27 @@ async function startFindJobs() {
   });
 
   if (!response.ok) {
-    const err = await response.json();
+    const err = await response.json().catch(() => ({}));
+    if (response.status === 401) {
+      findJobsModal.classList.add("hidden");
+      openAuthModal({
+        reason: err.detail || "Sign in to run Find Jobs and watch the live bot browser.",
+        nextAction: "find-jobs",
+      });
+      return;
+    }
     alert(err.detail || "Failed to start search");
     return;
   }
 
   findJobsModal.classList.add("hidden");
-  setRunStatus("Search running — browser opening...", true);
-  findJobsBtn.disabled = true;
+  const started = await response.json().catch(() => ({}));
+  if (started.kasm_enabled) {
+    setRunStatus("Search running — starting Kasm browsers...", true);
+  } else {
+    setRunStatus("Search running — browser opening...", true);
+  }
+  setSearchControls(true);
   showView("jobs");
   // Show every decision while live search is collecting jobs.
   document.querySelectorAll("#decision-chips .chip").forEach((el) => el.classList.remove("active"));
@@ -970,27 +1375,41 @@ async function startFindJobs() {
   pollSearchStatus();
 }
 
+function setSearchControls(running) {
+  if (findJobsBtn) findJobsBtn.disabled = !!running;
+  if (stopJobsBtn) {
+    stopJobsBtn.hidden = !running;
+    stopJobsBtn.disabled = false;
+  }
+}
+
 async function pollSearchStatus() {
   if (searchPollTimer) clearInterval(searchPollTimer);
   searchPollTimer = setInterval(async () => {
     const response = await fetch("/api/search/status");
     const status = await response.json();
     if (status.running) {
+      setSearchControls(true);
       const saved = status.saved || 0;
       const found = status.found || 0;
       const last = status.last_job_title ? ` · latest: ${status.last_job_title}` : "";
-      setRunStatus(`Searching — saved ${saved}/${found || saved}${last}`, true);
+      const prefix = status.kasm_enabled ? "Kasm search" : "Searching";
+      setRunStatus(`${prefix} — saved ${saved}/${found || saved}${last}`, true);
+      renderKasmLinks(status.kasm_sessions);
       // Refresh job list as soon as the bot saves each job.
       await loadJobs();
       return;
     }
     clearInterval(searchPollTimer);
-    findJobsBtn.disabled = false;
+    setSearchControls(false);
+    renderKasmLinks([]);
     // Keep log polling only while Runs tab is open.
     if (runsView?.classList.contains("hidden")) {
       stopLogPolling();
     }
-    if (status.error) {
+    if (status.stopped) {
+      setRunStatus(status.stop_message || "Stopped", false);
+    } else if (status.error) {
       setRunStatus(`Search failed: ${status.error}`, false);
       alert(`Search failed: ${status.error}\n\nCheck data/search_run.log for details.`);
     } else {
@@ -998,7 +1417,7 @@ async function pollSearchStatus() {
     }
     await loadRuns();
     await loadJobs();
-    if (status.summary && !status.error) {
+    if (status.summary && !status.error && !status.stopped) {
       setRunStatus(`Done — found ${status.summary.found}, saved ${status.summary.saved}`, false);
       showView("jobs");
     }
@@ -1007,6 +1426,28 @@ async function pollSearchStatus() {
 
 function setRunStatus(text, running) {
   runStatus.innerHTML = `<span class="status-dot ${running ? "running" : "ready"}"></span>${escapeHtml(text)}`;
+}
+
+function renderKasmLinks(sessions) {
+  if (!kasmLinks) return;
+  if (!currentUser) {
+    kasmLinks.hidden = true;
+    kasmLinks.innerHTML = "";
+    return;
+  }
+  const list = Array.isArray(sessions) ? sessions.filter((s) => s && s.view_url) : [];
+  if (!list.length) {
+    kasmLinks.hidden = true;
+    kasmLinks.innerHTML = "";
+    return;
+  }
+  kasmLinks.hidden = false;
+  kasmLinks.innerHTML = list
+    .map((s) => {
+      const label = PORTAL_LABELS[s.portal] || s.portal || "Kasm";
+      return `<a class="kasm-link" href="${escapeHtml(s.view_url)}" target="_blank" rel="noopener noreferrer">Watch ${escapeHtml(label)}</a>`;
+    })
+    .join("");
 }
 
 function escapeHtml(value) {
@@ -1022,6 +1463,15 @@ async function init() {
     alert("Credential storage failed to load. Please hard-refresh the page (Ctrl+F5).");
     return;
   }
+  await loadAuth();
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("auth") === "1" && !currentUser) {
+    const next = params.get("next") || null;
+    openAuthModal({
+      reason: "Sign in to watch the live JobSeek bot browser.",
+      nextAction: next,
+    });
+  }
   await loadCredentials();
   await loadRuns();
   showView("jobs");
@@ -1029,9 +1479,12 @@ async function init() {
   const statusResp = await fetch("/api/search/status");
   const status = await statusResp.json();
   if (status.running) {
-    findJobsBtn.disabled = true;
-    setRunStatus("Search running...", true);
+    setSearchControls(true);
+    setRunStatus(status.kasm_enabled ? "Kasm search running..." : "Search running...", true);
+    renderKasmLinks(status.kasm_sessions);
     pollSearchStatus();
+  } else {
+    setSearchControls(false);
   }
 }
 

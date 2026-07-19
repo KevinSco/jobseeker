@@ -46,23 +46,57 @@ python -m job_automation.main dashboard
 python -m job_automation.main schedule-info
 ```
 
-## Daily Scheduler (Windows)
+## Daily Scheduler
 
-Use Task Scheduler to run [`scripts/run_daily.bat`](scripts/run_daily.bat) daily, or run:
+**Windows:** use Task Scheduler with [`scripts/run_daily.bat`](scripts/run_daily.bat), or run `python -m job_automation.main schedule-info`.
+
+**Linux:** cron with [`scripts/run_daily.sh`](scripts/run_daily.sh), for example:
 
 ```bash
-python -m job_automation.main schedule-info
+crontab -e
+# 0 8 * * * /path/to/jobseek/scripts/run_daily.sh >> /path/to/jobseek/logs/daily.log 2>&1
 ```
 
 ## Configuration
 
 Edit [`job_automation/config/job_search_classify_rules.json`](job_automation/config/job_search_classify_rules.json) for search queries, target roles/skills, excluded roles, and keyword lists.
 
+### Kasm remote browsers (optional)
+
+**Offline mode (default, no API keys):** run Chrome-only containers (not a full desktop OS) via Docker, then enable in `.env`:
+
+```bash
+# Linux
+./scripts/start_kasm_local.sh
+
+# Windows
+scripts\start_kasm_local.cmd
+```
+
+```env
+KASM_ENABLED=true
+KASM_MODE=offline
+KASM_CDP_ENDPOINTS=http://127.0.0.1:9333,http://127.0.0.1:9334
+KASM_VIEW_URLS=https://127.0.0.1:6911,https://127.0.0.1:6912
+```
+
+- Watch (HTTPS, no Kasm password): https://127.0.0.1:6911 and https://127.0.0.1:6912  
+  JobSeek **Sign in** gates Find Jobs and Watch; browsing the job list stays free.  
+- Stop: `./scripts/stop_kasm_local.sh` (Linux) or `scripts\stop_kasm_local.cmd` (Windows)  
+- Requires Docker running  
+- Ports bind to `127.0.0.1` only  
+
+Click **Find Jobs** (requires account) — Playwright attaches over CDP. **Watch …** opens a JobSeek-gated viewer around Kasm Chrome.
+
 ## Dashboard
 
-Open `http://127.0.0.1:8000` after starting the dashboard command.
+**Linux:** `./run_dashboard.sh`  
+**Windows:** `run_dashboard.cmd`  
 
-- **Find Jobs** — sends browser-stored credentials to the runner, opens a visible browser, logs in, and searches
+Open `http://127.0.0.1:8000` after starting.
+
+- Browse the **Jobs** list without an account
+- **Find Jobs** / **Watch** require Sign up or Sign in (modal on demand — not on first load)
 - **Settings** — save portal login credentials in your browser (localStorage)
 - Top-center search queries jobs already collected by automation
 - Default view shows `eligible` and `needs_review`
