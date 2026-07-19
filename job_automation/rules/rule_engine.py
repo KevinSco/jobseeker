@@ -86,6 +86,8 @@ class RuleEngine:
         apply_review = self._apply_link_review_reason(job.apply_url)
         if apply_review:
             return apply_review
+        if job.skill_match is None:
+            return "Skills partially match target skills"
         if not job.description_text:
             return "Job description missing"
         if job.salary_text is None and job.salary_min_annual is None and job.salary_min_hourly is None:

@@ -20,6 +20,19 @@ def test_parse_annual_salary():
     assert result.max_annual == 150000
 
 
+def test_parse_builtin_k_salary_without_dollar():
+    result = parse_salary("124K-209K Annually")
+    assert result.min_annual == 124000
+    assert result.max_annual == 209000
+
+
+def test_parse_salary_ignores_stray_digit():
+    result = parse_salary("7")
+    assert result.min_annual is None
+    assert result.max_annual is None
+    assert result.salary_text == "7"
+
+
 def test_parse_hourly_salary():
     result = parse_salary("$55/hr")
     assert result.min_hourly == 55.0

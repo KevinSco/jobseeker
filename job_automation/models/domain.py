@@ -35,6 +35,8 @@ class RawJob(BaseModel):
     source_job_id: str | None = None
     job_card_title: str | None = None
     job_card_company: str | None = None
+    company_url: str | None = None
+    company_headline: str | None = None
     job_card_location: str | None = None
     job_card_salary: str | None = None
     job_card_url: str | None = None
@@ -42,6 +44,11 @@ class RawJob(BaseModel):
     apply_url: str | None = None
     industry: str | None = None
     work_type: str | None = None
+    experience_level: str | None = None
+    posted_text: str | None = None
+    top_skills: list[str] = Field(default_factory=list)
+    skills_required: list[str] = Field(default_factory=list)
+    match_background_text: str | None = None
     raw_html: str | None = None
     raw_text: str | None = None
     description_text: str | None = None
@@ -55,8 +62,16 @@ class JobDetail(BaseModel):
     source_job_id: str | None = None
     title: str | None = None
     company: str | None = None
+    company_url: str | None = None
+    company_headline: str | None = None
     location: str | None = None
     salary_text: str | None = None
+    industry: str | None = None
+    work_type: str | None = None
+    experience_level: str | None = None
+    posted_text: str | None = None
+    skills_required: list[str] = Field(default_factory=list)
+    match_background_text: str | None = None
     portal_job_url: str | None = None
     apply_url: str | None = None
     raw_html: str | None = None
@@ -68,8 +83,11 @@ class NormalizedJob(BaseModel):
     source_job_id: str | None = None
     title: str | None = None
     company: str | None = None
+    company_url: str | None = None
+    company_headline: str | None = None
     location: str | None = None
     remote_policy: str | None = None
+    work_type: str | None = None
     commitment: str | None = None
     experience_level: str | None = None
     industry: str | None = None
@@ -78,6 +96,7 @@ class NormalizedJob(BaseModel):
     salary_max_annual: int | None = None
     salary_min_hourly: float | None = None
     salary_max_hourly: float | None = None
+    posted_text: str | None = None
     security_clearance_required: bool | None = None
     travel_required: bool | None = None
     security_related_company_or_role: bool | None = None

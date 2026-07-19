@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Callable
+from typing import Any, Callable
 
 from playwright.async_api import Page
 
@@ -27,11 +27,20 @@ class BasePortalWorker(ABC):
         session_manager: SessionManager,
         *,
         early_duplicate_check: Callable[[str | None, str | None], bool] | None = None,
+        on_job_collected: Callable[[RawJob], Any] | None = None,
     ):
         self.config = config
         self.browser_manager = browser_manager
         self.session_manager = session_manager
         self.early_duplicate_check = early_duplicate_check
+        self.on_job_collected = on_job_collected
+
+    async def _emit_job(self, raw: RawJob) -> None:
+        if not self.on_job_collected:
+            return
+        result = self.on_job_collected(raw)
+        if hasattr(result, "__await__"):
+            await result
 
     @abstractmethod
     async def is_logged_in(self, page: Page) -> bool:
@@ -64,8 +73,15 @@ class BasePortalWorker(ABC):
             log_event(logger, f"Found {len(cards)} job cards", portal=self.portal_name, action="search")
             for card in cards:
                 if self.early_duplicate_check and self.early_duplicate_check(
-                    card.source_job_id, card.portal_job_url
+                    card.source_job_id, card.portal_job_url or card.job_card_url
                 ):
+                    log_event(
+                        logger,
+                        f"Skipping duplicate (already in DB): {card.portal_job_url or card.job_card_url}",
+                        portal=self.portal_name,
+                        job_id=card.source_job_id or "-",
+                        action="skip_duplicate",
+                    )
                     continue
                 try:
                     detail = await self.open_job(page, card)
@@ -74,15 +90,23 @@ class BasePortalWorker(ABC):
                         source_job_id=detail.source_job_id or card.source_job_id,
                         job_card_title=card.job_card_title or detail.title,
                         job_card_company=card.job_card_company or detail.company,
+                        company_url=card.company_url or detail.company_url,
+                        company_headline=detail.company_headline or card.company_headline,
                         job_card_location=card.job_card_location or detail.location,
                         job_card_salary=card.job_card_salary or detail.salary_text,
                         job_card_url=card.job_card_url,
                         portal_job_url=detail.portal_job_url or card.portal_job_url,
                         apply_url=detail.apply_url,
+                        industry=detail.industry or card.industry,
+                        work_type=detail.work_type or card.work_type,
+                        experience_level=detail.experience_level or card.experience_level,
+                        posted_text=detail.posted_text or card.posted_text,
+                        top_skills=card.top_skills,
                         raw_html=detail.raw_html,
                         description_text=detail.description_text,
                     )
                     collected.append(raw)
+                    await self._emit_job(raw)
                     log_event(
                         logger,
                         f"Extracted job: {raw.job_card_title}",

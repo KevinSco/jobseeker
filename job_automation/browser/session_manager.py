@@ -65,8 +65,16 @@ class SessionManager:
                 await self.save_session(portal)
                 return page, True
 
-        if allow_headful_recovery and self.browser_manager.headful:
-            log_event(logger, "Waiting for manual login", portal=portal, action="manual_login")
+        if allow_headful_recovery and (self.browser_manager.headful or self.browser_manager.uses_kasm):
+            if self.browser_manager.uses_kasm:
+                log_event(
+                    logger,
+                    "Waiting for manual login in Kasm (open Watch link in dashboard)",
+                    portal=portal,
+                    action="manual_login",
+                )
+            else:
+                log_event(logger, "Waiting for manual login", portal=portal, action="manual_login")
             await page.wait_for_timeout(120000)
             logged_in = await self._check_login(page, portal)
             if logged_in:

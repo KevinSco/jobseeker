@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import urljoin
+from urllib.parse import quote_plus, urljoin
 
 from playwright.async_api import Locator, Page
 
@@ -24,6 +24,7 @@ class BuiltInWorker(BasePortalWorker):
     def __init__(self, *args, banned_companies: set[str] | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.banned_companies = {c.lower().strip() for c in (banned_companies or set()) if c}
+        self._current_list_url: str | None = None
 
     async def is_logged_in(self, page: Page) -> bool:
         content = (await page.content()).lower()
@@ -37,6 +38,7 @@ class BuiltInWorker(BasePortalWorker):
             raise LoginRequiredError(f"{self.portal_name} requires manual login")
 
         collected: list[RawJob] = []
+        seen_urls: set[str] = set()
         queries = self.config.queries_for_portal(self.portal_name)
         try:
             for query in queries:
@@ -46,9 +48,17 @@ class BuiltInWorker(BasePortalWorker):
                     portal=self.portal_name,
                     action="search_query",
                 )
-                await self._open_jobs_board(page)
-                await self._apply_default_filters(page)
-                await self._submit_keyword_search(page, query)
+                try:
+                    await self._open_filtered_search(page, query)
+                except Exception as exc:
+                    log_event(
+                        logger,
+                        f"Search setup failed for '{query}': {exc}",
+                        portal=self.portal_name,
+                        action="search_error",
+                        level=40,
+                    )
+                    continue
 
                 for page_num in range(self.config.max_pages_per_query):
                     cards = await self._job_cards(page)
@@ -75,17 +85,47 @@ class BuiltInWorker(BasePortalWorker):
                             break
                         card = cards[index]
                         try:
+                            href = await self._card_job_href(card)
+                            if not href:
+                                continue
+                            detail_url = href if href.startswith("http") else urljoin(BUILTIN_ORIGIN, href)
+                            source_job_id = extract_job_id_from_url(detail_url)
+                            url_key = detail_url.rstrip("/")
+
+                            # Duplicate filter: skip before heart/detail/ETL — just move to next card.
+                            # Keep mark_duplicates rule in orchestrator for near-duplicates that still open.
+                            if url_key in seen_urls or (
+                                self.early_duplicate_check
+                                and self.early_duplicate_check(source_job_id, detail_url)
+                            ):
+                                log_event(
+                                    logger,
+                                    f"Skipping duplicate — move to next job: {detail_url}",
+                                    portal=self.portal_name,
+                                    job_id=source_job_id or "-",
+                                    action="skip_duplicate",
+                                )
+                                continue
+
+                            # One job at a time: expand/identify → save → then next dropdown.
                             raw = await self._process_card(page, card, query)
                             if raw is None:
+                                log_event(
+                                    logger,
+                                    f"Card produced no job — move to next: {detail_url}",
+                                    portal=self.portal_name,
+                                    job_id=source_job_id or "-",
+                                    action="skip_empty",
+                                    level=30,
+                                )
                                 continue
-                            if self.early_duplicate_check and self.early_duplicate_check(
-                                raw.source_job_id, raw.portal_job_url
-                            ):
-                                continue
+                            seen_urls.add(url_key)
                             collected.append(raw)
+                            await self._emit_job(raw)
                             log_event(
                                 logger,
-                                f"Collected: {raw.job_card_title} ({raw.forced_decision or 'pending'})",
+                                f"Identified and saved — move to next job: {raw.job_card_title} "
+                                f"({raw.forced_decision or 'pending'})",
                                 portal=self.portal_name,
                                 job_id=raw.source_job_id or "-",
                                 action="extract",
@@ -98,14 +138,12 @@ class BuiltInWorker(BasePortalWorker):
                                 action="extract_error",
                                 level=40,
                             )
+                            # List page should still be open (detail uses a new tab).
                             try:
-                                if "jobs" not in page.url:
-                                    await page.go_back(wait_until="domcontentloaded", timeout=30000)
-                                    await page.wait_for_timeout(1500)
+                                if "jobs" not in (page.url or ""):
+                                    await self._return_to_list(page, query)
                             except Exception:
-                                await self._open_jobs_board(page)
-                                await self._apply_default_filters(page)
-                                await self._submit_keyword_search(page, query)
+                                await self._return_to_list(page, query)
 
                     if not await self._go_next_page(page):
                         break
@@ -139,49 +177,124 @@ class BuiltInWorker(BasePortalWorker):
         return urljoin(BUILTIN_ORIGIN, href)
 
     async def extract_description(self, page: Page) -> str | None:
-        for selector in [
-            "[data-id='job-description']",
-            ".job-description",
-            "#job-description",
-            "section.description",
-            "article",
-            "main",
-        ]:
-            text = await safe_inner_text(page, selector)
-            if text and len(text) > 120:
-                return text
-        return await safe_inner_text(page, "body")
+        # Built In job body is always in a div whose id starts with "job-post-body-".
+        text = await safe_inner_text(page, "div[id^='job-post-body']")
+        if text:
+            return text
+        return None
 
     async def _open_jobs_board(self, page: Page) -> None:
         await page.goto(self.base_url, wait_until="domcontentloaded", timeout=90000)
         await page.wait_for_timeout(2000)
 
+    def _search_url(self, query: str) -> str:
+        # Keyword only via URL; job type / location / posted date are applied in order after.
+        return f"{self.base_url}?search={quote_plus(query)}"
+
+    async def _open_filtered_search(self, page: Page, query: str) -> None:
+        url = self._search_url(query)
+        log_event(logger, f"Opening search URL: {url}", portal=self.portal_name, action="search_query")
+        await page.goto(url, wait_until="domcontentloaded", timeout=90000)
+        await page.wait_for_timeout(2500)
+        self._current_list_url = page.url
+        await self._apply_default_filters(page)
+        self._current_list_url = page.url
+        await page.wait_for_timeout(1000)
+
+    async def _return_to_list(self, page: Page, query: str) -> None:
+        target = self._current_list_url or self._search_url(query)
+        try:
+            await page.goto(target, wait_until="domcontentloaded", timeout=90000)
+            await page.wait_for_timeout(1500)
+        except Exception:
+            await self._open_filtered_search(page, query)
+
+    async def _safe_click(self, locator: Locator, *, timeout: int = 5000) -> bool:
+        try:
+            if await locator.count() == 0:
+                return False
+            await locator.scroll_into_view_if_needed(timeout=timeout)
+            await locator.click(timeout=timeout, force=False)
+            return True
+        except Exception:
+            try:
+                # Sticky Built In header often intercepts normal clicks.
+                await locator.click(timeout=timeout, force=True)
+                return True
+            except Exception:
+                return False
+
     async def _apply_default_filters(self, page: Page) -> None:
-        """Default: USA + Fully Remote + Past 24 hours."""
-        await self._set_location_usa(page)
+        """Filter order after keyword: job type → location → posted date."""
         await self._set_fully_remote(page)
+        await self._set_location_usa(page)
         await self._set_past_24_hours(page)
-        await page.wait_for_timeout(1200)
+        await page.wait_for_timeout(800)
 
     async def _set_location_usa(self, page: Page) -> None:
         locator = page.locator("#locationDropdownInput-JobBoard").first
         if await locator.count() == 0:
             return
         try:
-            await locator.click(timeout=5000)
+            # Skip if already set to United States / USA.
+            current = normalize_whitespace(await locator.input_value()) or ""
+            if current.lower() in {"united states", "usa", "us"}:
+                log_event(
+                    logger,
+                    f"Location already {current} — skip",
+                    portal=self.portal_name,
+                    action="filter",
+                )
+                return
+
+            await self._safe_click(locator)
             await locator.fill("")
-            await locator.type("USA", delay=80)
-            await page.wait_for_timeout(800)
-            option = page.locator(
-                "[role='option']:has-text('USA'), "
-                "li:has-text('USA'), "
-                "button:has-text('USA'), "
-                "div:has-text('United States')"
+            await locator.type("United States", delay=70)
+            # Wait for Alpine location dropdown results to render.
+            menu = page.locator(
+                "ul[x-ref='locationDropdownMenu'], "
+                "ul.dropdown-menu[aria-labelledby='locationDropdownInput-JobBoard'], "
+                "ul.dropdown-menu"
             ).first
+            try:
+                await menu.wait_for(state="visible", timeout=1000)
+            except Exception:
+                await page.wait_for_timeout(500)
+
+            # Built In renders results as label.list-group-item-action inside the menu.
+            option = page.locator(
+                "ul[x-ref='locationDropdownMenu'] label.list-group-item-action:has-text('United States'), "
+                "ul.dropdown-menu label.list-group-item-action:has-text('United States'), "
+                "label.list-group-item-action:has-text('United States'), "
+                "ul.dropdown-menu >> text=United States"
+            ).first
+            if await option.count() == 0:
+                option = page.locator(
+                    "ul[x-ref='locationDropdownMenu'] label.list-group-item-action:has-text('USA'), "
+                    "label.list-group-item-action:has-text('USA')"
+                ).first
+
             if await option.count():
-                await option.click(timeout=3000)
+                await option.scroll_into_view_if_needed(timeout=3000)
+                await self._safe_click(option, timeout=4000)
+                log_event(
+                    logger,
+                    "Location filter set via dropdown menu: United States",
+                    portal=self.portal_name,
+                    action="filter",
+                )
             else:
+                # Fallback: arrow-down + enter on first suggestion.
+                await page.keyboard.press("ArrowDown")
+                await page.wait_for_timeout(200)
                 await page.keyboard.press("Enter")
+                log_event(
+                    logger,
+                    "Location dropdown label not found — used keyboard select",
+                    portal=self.portal_name,
+                    action="filter",
+                    level=30,
+                )
             await page.wait_for_timeout(600)
         except Exception as exc:
             log_event(logger, f"Location filter skipped: {exc}", portal=self.portal_name, action="filter", level=30)
@@ -191,7 +304,8 @@ class BuiltInWorker(BasePortalWorker):
         if await button.count() == 0:
             return
         try:
-            await button.click(timeout=5000)
+            if not await self._safe_click(button):
+                raise RuntimeError("remote dropdown not clickable")
             await page.wait_for_timeout(400)
             option = page.locator(
                 "button:has-text('Fully Remote'), "
@@ -200,8 +314,8 @@ class BuiltInWorker(BasePortalWorker):
                 "li:has-text('Fully Remote')"
             ).first
             if await option.count():
-                await option.click(timeout=5000)
-            await page.wait_for_timeout(600)
+                await self._safe_click(option)
+            await page.wait_for_timeout(500)
         except Exception as exc:
             log_event(logger, f"Remote filter skipped: {exc}", portal=self.portal_name, action="filter", level=30)
 
@@ -210,7 +324,18 @@ class BuiltInWorker(BasePortalWorker):
         if await button.count() == 0:
             return
         try:
-            await button.click(timeout=5000)
+            # Re-clicking when already selected resets the filter on Built In.
+            label = normalize_whitespace(await button.inner_text()) or ""
+            if "past 24 hour" in label.lower():
+                log_event(
+                    logger,
+                    "Posted date already Past 24 hours — skip click",
+                    portal=self.portal_name,
+                    action="filter",
+                )
+                return
+            if not await self._safe_click(button):
+                raise RuntimeError("posted-date dropdown not clickable")
             await page.wait_for_timeout(400)
             option = page.locator(
                 "button:has-text('Past 24 hours'), "
@@ -221,43 +346,14 @@ class BuiltInWorker(BasePortalWorker):
                 "[role='option']:has-text('Past 24 Hours')"
             ).first
             if await option.count():
-                await option.click(timeout=5000)
-            await page.wait_for_timeout(600)
+                await self._safe_click(option)
+            await page.wait_for_timeout(500)
         except Exception as exc:
             log_event(logger, f"Posted-date filter skipped: {exc}", portal=self.portal_name, action="filter", level=30)
 
     async def _submit_keyword_search(self, page: Page, query: str) -> None:
-        # Prefer the main search bar on the jobs board.
-        candidates = [
-            "input[placeholder*='Search' i]",
-            "input[type='search']",
-            "input[name='search']",
-            "#search",
-        ]
-        search = None
-        for selector in candidates:
-            locator = page.locator(selector).first
-            if await locator.count():
-                search = locator
-                break
-        if search is None:
-            # Fallback: querystring navigation with common Built In params.
-            from urllib.parse import quote_plus
-
-            url = (
-                f"{self.base_url}?search={quote_plus(query)}"
-                f"&remote=true&country=USA&daysSinceUpdated=1"
-            )
-            await page.goto(url, wait_until="domcontentloaded", timeout=90000)
-            await page.wait_for_timeout(2000)
-            return
-
-        await search.click(timeout=5000)
-        await search.fill("")
-        await search.press_sequentially(query, delay=120)
-        await page.wait_for_timeout(300)
-        await page.keyboard.press("Enter")
-        await page.wait_for_timeout(2500)
+        """Deprecated path kept for compatibility; URL search is preferred."""
+        await self._open_filtered_search(page, query)
 
     async def _job_cards(self, page: Page) -> list[Locator]:
         # Built In job cards typically have a dropdown button; use that as the card root.
@@ -283,16 +379,23 @@ class BuiltInWorker(BasePortalWorker):
 
     async def _process_card(self, page: Page, card: Locator, query: str) -> RawJob | None:
         company = await self._card_company(card)
+        company_url = await self._card_company_url(card)
         title = await self._card_title(card)
         detail_href = await self._card_job_href(card)
         if not detail_href:
             return None
         detail_url = detail_href if detail_href.startswith("http") else urljoin(BUILTIN_ORIGIN, detail_href)
         location = await self._card_text_match(card, r"(United States|USA|Remote|[A-Za-z ]+, [A-Z]{2})")
-        salary = await self._card_text_match(card, r"\$?\d[\d,]*K?(?:\s*-\s*\$?\d[\d,]*K?)?(?:\s*Annually)?")
+        # Prefer explicit salary shapes ($120K, 124K-209K Annually); avoid lone digits.
+        salary = await self._card_text_match(
+            card,
+            r"(?:\$\d[\d,]*(?:\.\d+)?(?:\s*-\s*\$?\d[\d,]*(?:\.\d+)?)?\s*K?(?:\s*Annually)?|"
+            r"\d{2,3}K(?:\s*-\s*\d{2,3}K)?(?:\s*Annually)?)",
+        )
         work_type = await self._card_work_type(card)
 
         industry = await self._expand_and_read_industry(card)
+        top_skills = await self._card_top_skills(card)
         ban_reason = self._card_reject_reason(company, industry)
         if ban_reason:
             await self._click_heart(card)
@@ -301,65 +404,79 @@ class BuiltInWorker(BasePortalWorker):
                 source_job_id=extract_job_id_from_url(detail_url),
                 job_card_title=title,
                 job_card_company=company,
+                company_url=company_url,
                 job_card_location=location,
                 job_card_salary=salary,
                 job_card_url=detail_url,
                 portal_job_url=detail_url,
                 industry=industry,
                 work_type=work_type,
+                top_skills=top_skills,
                 description_text=f"Query: {query}\nIndustry: {industry or ''}\n{ban_reason}",
                 forced_decision=Decision.REJECTED,
                 forced_decision_reason=ban_reason,
             )
 
-        # Good card: save heart, then open job title (not company).
+        # Good card: heart on list, open detail in a NEW TAB so the list page stays intact.
         await self._click_heart(card)
-        await self._click_job_title(card)
-        await page.wait_for_load_state("domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(1500)
-
-        detail = await self._extract_detail(
+        detail = await self._extract_detail_in_new_tab(
             page,
+            detail_url,
             RawJob(
                 source_portal=self.portal_name,
                 source_job_id=extract_job_id_from_url(detail_url),
                 job_card_title=title,
                 job_card_company=company,
+                company_url=company_url,
                 job_card_location=location,
                 job_card_salary=salary,
                 job_card_url=detail_url,
-                portal_job_url=page.url or detail_url,
+                portal_job_url=detail_url,
                 industry=industry,
                 work_type=work_type,
+                top_skills=top_skills,
             ),
         )
 
-        raw = RawJob(
+        return RawJob(
             source_portal=self.portal_name,
             source_job_id=detail.source_job_id,
             job_card_title=detail.title or title,
             job_card_company=detail.company or company,
+            company_url=company_url or detail.company_url,
+            company_headline=detail.company_headline,
             job_card_location=detail.location or location,
             job_card_salary=detail.salary_text or salary,
             job_card_url=detail_url,
             portal_job_url=detail.portal_job_url or detail_url,
             apply_url=detail.apply_url,
-            industry=industry,
-            work_type=work_type or detail.location,
+            industry=detail.industry or industry,
+            work_type=detail.work_type or work_type,
+            experience_level=detail.experience_level,
+            posted_text=detail.posted_text,
+            top_skills=detail.skills_required or top_skills,
+            skills_required=detail.skills_required or top_skills,
+            match_background_text=detail.match_background_text,
             raw_html=detail.raw_html,
             description_text=detail.description_text,
         )
 
-        # Return to list for the next card.
+    async def _extract_detail_in_new_tab(self, list_page: Page, detail_url: str, raw_job: RawJob) -> JobDetail:
+        """Open job detail in a new tab, scrape it, then close — keep the list tab."""
+        detail_page = await list_page.context.new_page()
         try:
-            await page.go_back(wait_until="domcontentloaded", timeout=45000)
-            await page.wait_for_timeout(1500)
-        except Exception:
-            await self._open_jobs_board(page)
-            await self._apply_default_filters(page)
-            await self._submit_keyword_search(page, query)
-
-        return raw
+            await detail_page.goto(detail_url, wait_until="domcontentloaded", timeout=90000)
+            await detail_page.wait_for_timeout(1500)
+            return await self._extract_detail(detail_page, raw_job)
+        finally:
+            try:
+                await detail_page.close()
+            except Exception:
+                pass
+            try:
+                await list_page.bring_to_front()
+            except Exception:
+                pass
 
     def _card_reject_reason(self, company: str | None, industry: str | None) -> str | None:
         if company and company.lower().strip() in self.banned_companies:
@@ -373,22 +490,56 @@ class BuiltInWorker(BasePortalWorker):
         return None
 
     async def _expand_and_read_industry(self, card: Locator) -> str | None:
+        # Only use this card's dropdown — never fall back to another card on the page.
         dropdown = card.locator("#job-dropdown-button, button#job-dropdown-button").first
-        if await dropdown.count() == 0:
-            dropdown = card.page.locator("#job-dropdown-button").first
         try:
             if await dropdown.count():
-                await dropdown.click(timeout=4000)
-                await card.page.wait_for_timeout(700)
-        except Exception:
-            pass
+                await dropdown.scroll_into_view_if_needed(timeout=4000)
+                await self._safe_click(dropdown, timeout=4000)
+                await card.page.wait_for_timeout(800)
+        except Exception as exc:
+            log_event(
+                logger,
+                f"Job dropdown expand failed: {exc}",
+                portal=self.portal_name,
+                action="expand_card",
+                level=30,
+            )
 
+        # Industry is inside the expanded card; do not read from other cards.
         industry_node = card.locator("div.mb-md.fs-xs.fw-bold").first
         if await industry_node.count() == 0:
-            industry_node = card.page.locator("div.mb-md.fs-xs.fw-bold").first
-        if await industry_node.count() == 0:
             return None
-        return normalize_whitespace(await industry_node.inner_text())
+        text = normalize_whitespace(await industry_node.inner_text())
+        # Ignore accidental matches like "Top Skills" headers.
+        if not text or text.lower().startswith("top skill"):
+            return None
+        return text
+
+    async def _card_top_skills(self, card: Locator) -> list[str]:
+        """Read Built In card 'Top Skills:' chips from the list page."""
+        skills: list[str] = []
+        block = card.locator("div:has(span:text-is('Top Skills:')), div:has-text('Top Skills:')").first
+        if await block.count() == 0:
+            block = card
+        # Prefer the sibling chip container next to the Top Skills label.
+        chips = block.locator(
+            "xpath=.//span[normalize-space()='Top Skills:']/following-sibling::span[1]//span"
+        )
+        count = await chips.count()
+        if count == 0:
+            chips = block.locator("span.fs-xs.text-gray-04.mx-sm, span.d-md-inline span")
+            count = await chips.count()
+        for i in range(count):
+            text = normalize_whitespace(await chips.nth(i).inner_text())
+            if not text:
+                continue
+            lowered = text.lower()
+            if lowered in {"top skills:", "top skills"}:
+                continue
+            if text not in skills:
+                skills.append(text)
+        return skills
 
     async def _click_heart(self, card: Locator) -> None:
         selectors = [
@@ -403,12 +554,9 @@ class BuiltInWorker(BasePortalWorker):
             btn = card.locator(selector).first
             if await btn.count() == 0:
                 continue
-            try:
-                await btn.click(timeout=3000)
+            if await self._safe_click(btn, timeout=3000):
                 await card.page.wait_for_timeout(400)
                 return
-            except Exception:
-                continue
 
     async def _click_job_title(self, card: Locator) -> None:
         # Prefer job detail links; avoid company profile links.
@@ -419,10 +567,12 @@ class BuiltInWorker(BasePortalWorker):
 
     async def _card_company(self, card: Locator) -> str | None:
         for selector in [
+            "#company-title",
+            "a#company-title",
+            "[id='company-title']",
             "a[href*='/company/']",
             "[data-id='company-title']",
             ".company-title",
-            "span:has-text('')",
         ]:
             node = card.locator(selector).first
             if await node.count() == 0:
@@ -435,6 +585,20 @@ class BuiltInWorker(BasePortalWorker):
         if not text:
             return None
         return text.split("\n")[0][:120]
+
+    async def _card_company_url(self, card: Locator) -> str | None:
+        # Built In list cards expose the company link as id="company-title".
+        link = card.locator("#company-title, a#company-title, [id='company-title']").first
+        if await link.count() == 0:
+            link = card.locator("a[href*='/company/']").first
+        if await link.count() == 0:
+            return None
+        href = await link.get_attribute("href")
+        if not href:
+            return None
+        if href.startswith("http"):
+            return href
+        return urljoin(BUILTIN_ORIGIN, href)
 
     async def _card_title(self, card: Locator) -> str | None:
         link = card.locator("a[href*='/job/']:not([href*='/company/'])").first
@@ -468,29 +632,158 @@ class BuiltInWorker(BasePortalWorker):
         return normalize_whitespace(match.group(0)) if match else None
 
     async def _extract_detail(self, page: Page, raw_job: RawJob) -> JobDetail:
-        title = await safe_inner_text(page, "h1, .job-title, [data-id='job-title']")
+        # Built In detail header is a 3-column row: company/title/posted | meta | industry/headline.
+        title = await safe_inner_text(page, "h1.fw-extrabold span, h1.fw-extrabold, h1, .job-title")
         company = await safe_inner_text(
-            page, "a[href*='/company/'], .company-title, [data-company], [data-id='company-title']"
+            page,
+            "a[href*='/company/'] h2, h2.text-pretty-blue, "
+            "a[href*='/company/'].text-pretty-blue, .company-title, [data-id='company-title']",
         )
-        location = await safe_inner_text(page, ".job-location, .location, [data-id='job-location']")
-        salary = await safe_inner_text(page, ".job-salary, .salary, [data-id='job-salary']")
-        work_type = await safe_inner_text(
-            page, "[data-id='job-remote'], .remote-badge, :text-matches('Remote|Hybrid', 'i')"
-        )
+        company_url = await self._detail_company_url(page) or raw_job.company_url
+        posted_text = await self._detail_posted_text(page)
+        location = await self._detail_icon_row_text(page, "fa-location-dot")
+        if not location:
+            location = await safe_inner_text(page, ".job-location, .location, [data-id='job-location']")
+        work_type = await self._detail_icon_row_text(page, "fa-house-building")
+        salary = await self._detail_icon_row_text(page, "fa-sack-dollar")
+        if not salary:
+            salary = await safe_inner_text(page, ".job-salary, .salary, [data-id='job-salary']")
+        experience_level = await self._detail_icon_row_text(page, "fa-trophy")
+        industry, company_headline = await self._detail_industry_and_headline(page)
         apply_url = await self.extract_apply_url(page)
-        description = await self.extract_description(page)
+        # Evidence sources on Built In detail:
+        # 1) job head (above), 2) match-background, 3) job-post-body-*, 4) Skills Required card.
+        body = await self.extract_description(page)
+        match_background = await self._detail_match_background(page)
+        skills_required, skills_text = await self._detail_skills_required(page)
+        description = "\n\n".join(
+            part for part in [body, match_background, skills_text] if part
+        ) or None
         return JobDetail(
             source_portal=self.portal_name,
             source_job_id=raw_job.source_job_id or extract_job_id_from_url(page.url),
             title=title or raw_job.job_card_title,
             company=company or raw_job.job_card_company,
+            company_url=company_url,
+            company_headline=company_headline,
             location=location or raw_job.job_card_location,
             salary_text=salary or raw_job.job_card_salary,
+            industry=industry or raw_job.industry,
+            work_type=work_type or raw_job.work_type,
+            experience_level=experience_level or raw_job.experience_level,
+            posted_text=posted_text or raw_job.posted_text,
+            skills_required=skills_required,
+            match_background_text=match_background,
             portal_job_url=page.url or raw_job.portal_job_url,
             apply_url=apply_url,
             raw_html=await page.content(),
             description_text=description,
         )
+
+    async def _detail_match_background(self, page: Page) -> str | None:
+        return await safe_inner_text(
+            page,
+            "div.match-background, .match-background, [class*='match-background']",
+        )
+
+    async def _detail_skills_required(self, page: Page) -> tuple[list[str], str | None]:
+        """Read the Skills Required white card on Built In detail."""
+        section = page.locator(
+            "div.bg-white.rounded-3.p-md:has-text('Skills Required'), "
+            "div.col-12.col-lg-6:has-text('Skills Required'), "
+            "div.bg-white.rounded-3.p-md.mb-sm.full-size:has-text('Skill')"
+        ).first
+        if await section.count() == 0:
+            return [], None
+        full_text = normalize_whitespace(await section.inner_text())
+        skills: list[str] = []
+        # Prefer chip/badge spans inside the skills card.
+        chips = section.locator(
+            "span.badge, span.rounded-pill, a.badge, "
+            "div.d-flex.flex-wrap span, li, "
+            "span.fw-semibold, span.fw-medium"
+        )
+        count = await chips.count()
+        for i in range(min(count, 40)):
+            text = normalize_whitespace(await chips.nth(i).inner_text())
+            if not text or len(text) > 60:
+                continue
+            lowered = text.lower()
+            if lowered in {"skills required", "skill required", "skills", "required"}:
+                continue
+            if text not in skills:
+                skills.append(text)
+        if not skills and full_text:
+            # Fallback: split on bullets / commas after the heading.
+            payload = re.sub(r"(?i)^skills?\s*required[:\s]*", "", full_text).strip()
+            for part in re.split(r"[•·|,/\n]+", payload):
+                token = normalize_whitespace(part)
+                if token and len(token) < 60 and token.lower() not in {"skills required", "required"}:
+                    skills.append(token)
+        return skills, full_text
+
+    async def _detail_company_url(self, page: Page) -> str | None:
+        link = page.locator("a[href*='/company/']").first
+        if await link.count() == 0:
+            return None
+        href = await link.get_attribute("href")
+        if not href:
+            return None
+        if href.startswith("http"):
+            return href
+        return urljoin(BUILTIN_ORIGIN, href)
+
+    async def _detail_posted_text(self, page: Page) -> str | None:
+        posted = await safe_inner_text(
+            page,
+            "i.fa-clock ~ span.font-barlow, span.font-barlow:text-matches('Posted', 'i')",
+        )
+        if posted:
+            return posted
+        clock = page.locator("i.fa-clock, i[class*='fa-clock']").first
+        if await clock.count() == 0:
+            return None
+        title = await clock.get_attribute("title")
+        if not title:
+            return None
+        text = title.strip()
+        if text.lower().startswith("job "):
+            text = text[4:]
+        return normalize_whitespace(text)
+
+    async def _detail_icon_row_text(self, page: Page, icon_fragment: str) -> str | None:
+        icon = page.locator(f"i[class*='{icon_fragment}']").first
+        if await icon.count() == 0:
+            return None
+        row = icon.locator(
+            "xpath=ancestor::div[contains(@class,'d-flex') and contains(@class,'align-items-start')][1]"
+        )
+        if await row.count() == 0:
+            row = icon.locator("xpath=ancestor::div[contains(@class,'d-flex')][1]")
+        if await row.count() == 0:
+            return None
+        # Prefer the text container (may include nested spans like location).
+        text_node = row.locator(".font-barlow, span.font-barlow").first
+        if await text_node.count() == 0:
+            text_node = row.locator("span").last
+        if await text_node.count():
+            text = normalize_whitespace(await text_node.inner_text())
+            if text:
+                return text
+        return normalize_whitespace(await row.inner_text())
+
+    async def _detail_industry_and_headline(self, page: Page) -> tuple[str | None, str | None]:
+        industry = await safe_inner_text(page, "div.font-barlow.fw-medium.mb-md, div.font-barlow.fw-medium")
+        if industry and "•" not in industry and "·" not in industry:
+            # Avoid grabbing unrelated medium-weight Barlow text.
+            industry = None
+        headline = await safe_inner_text(
+            page,
+            "div.bg-white.rounded-3.p-md.h-100 > div.fs-md.fw-regular, "
+            "div.font-barlow.fw-medium.mb-md + div.fs-md.fw-regular, "
+            "div.fw-medium.mb-md + div.fs-md.fw-regular",
+        )
+        return industry, headline
 
     async def _go_next_page(self, page: Page) -> bool:
         next_btn = page.locator(

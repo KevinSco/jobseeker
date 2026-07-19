@@ -23,7 +23,13 @@
         <div class="brand">JobSeek Auto</div>
         <div class="topbar-actions">
           <button id="find-jobs-btn" class="primary-btn" type="button">Find Jobs</button>
+          <button id="stop-jobs-btn" class="danger-btn topbar-stop-btn" type="button" hidden>Stop</button>
+          <button id="clear-jobs-btn" class="secondary-btn" type="button">Clear Jobs</button>
           <span id="run-status" class="muted">Ready</span>
+          <span id="kasm-links" class="kasm-links" hidden></span>
+          <div id="auth-slot" class="auth-slot">
+            <button id="signin-btn" class="secondary-btn" type="button">Sign in</button>
+          </div>
         </div>
       </header>
 
@@ -42,7 +48,8 @@
         <section class="panels home-panels">
           <div class="panel recent-runs">
             <h2>Recent Automation Runs</h2>
-            <div id="runs-list" class="runs-list"></div>
+            <p class="muted">Open the <strong>Runs</strong> tab for full history and live bot worker logs.</p>
+            <div id="home-runs-list" class="runs-list"></div>
           </div>
         </section>
       </section>
@@ -83,20 +90,83 @@
             </div>
 
             <div class="jobs-content">
-              <div class="panel jobs-panel">
-                <div class="jobs-panel-header">
-                  <h2 id="jobs-list-title">Positions</h2>
-                  <span id="jobs-count" class="muted"></span>
+              <div class="panel jobs-panel jobs-panel-grid">
+                <div class="jobs-results-bar">
+                  <div class="jobs-results-stats" id="jobs-results-stats">
+                    <span><strong id="jobs-total-count">0</strong> jobs</span>
+                    <span class="jobs-results-sep">·</span>
+                    <span><strong id="jobs-company-count">0</strong> companies</span>
+                  </div>
+                  <div class="jobs-sort" id="jobs-sort-wrap">
+                    <span class="jobs-sort-label">Sort by:</span>
+                    <button type="button" class="jobs-sort-trigger" id="jobs-sort-trigger" aria-haspopup="listbox" aria-expanded="false">
+                      <span id="jobs-sort-label">Relevance</span>
+                      <span class="jobs-sort-caret" aria-hidden="true"></span>
+                    </button>
+                    <div class="jobs-sort-menu hidden" id="jobs-sort-menu" role="listbox" aria-label="Sort jobs">
+                      <button type="button" class="jobs-sort-option active" role="option" data-value="relevance" aria-selected="true">Relevance</button>
+                      <button type="button" class="jobs-sort-option" role="option" data-value="recent" aria-selected="false">Most recent</button>
+                      <button type="button" class="jobs-sort-option" role="option" data-value="oldest" aria-selected="false">Oldest</button>
+                      <button type="button" class="jobs-sort-option" role="option" data-value="salary_high" aria-selected="false">Highest salary</button>
+                      <button type="button" class="jobs-sort-option" role="option" data-value="salary_low" aria-selected="false">Lowest salary</button>
+                      <button type="button" class="jobs-sort-option" role="option" data-value="experience_least" aria-selected="false">Least experience</button>
+                      <button type="button" class="jobs-sort-option" role="option" data-value="experience_most" aria-selected="false">Most experience</button>
+                    </div>
+                    <input type="hidden" id="jobs-sort" value="relevance">
+                  </div>
                 </div>
-                <div id="jobs-list" class="jobs-list"></div>
+                <div id="jobs-select-bar" class="jobs-select-bar hidden">
+                  <button type="button" id="select-all-jobs" class="secondary-btn">Select All</button>
+                  <span id="jobs-select-count" class="muted">0 selected</span>
+                  <button type="button" id="cancel-jobs-select" class="secondary-btn">Cancel</button>
+                  <button type="button" id="delete-selected-jobs" class="danger-btn">Delete</button>
+                </div>
+                <div id="jobs-list" class="jobs-grid"></div>
                 <div id="pagination" class="pagination"></div>
               </div>
+            </div>
+          </div>
+        </div>
 
-              <div class="panel detail-panel">
-                <h2>Job Detail</h2>
-                <div id="job-detail" class="job-detail empty">Select a job to view evidence and links.</div>
+        <aside id="job-detail-drawer" class="job-detail-drawer hidden" aria-hidden="true">
+          <div class="job-detail-drawer-backdrop" id="job-detail-backdrop"></div>
+          <div class="job-detail-drawer-panel panel">
+            <div class="jobs-panel-header">
+              <h2>Job Detail</h2>
+              <button type="button" id="close-job-detail" class="secondary-btn" aria-label="Close detail">Close</button>
+            </div>
+            <div id="job-detail" class="job-detail empty">Select a job to view evidence and links.</div>
+          </div>
+        </aside>
+      </section>
+
+      <section id="runs-view" class="view-section hidden">
+        <div class="runs-layout">
+          <div class="panel runs-history-panel">
+            <div class="jobs-panel-header">
+              <h2>Recent Runs</h2>
+              <button type="button" id="refresh-runs-btn" class="secondary-btn">Refresh</button>
+            </div>
+            <div id="runs-list" class="runs-list"></div>
+          </div>
+
+          <div class="panel runs-log-panel">
+            <div class="jobs-panel-header">
+              <h2>Bot Worker Logs</h2>
+              <div class="log-toolbar">
+                <select id="log-source">
+                  <option value="automation">automation.log</option>
+                  <option value="search">search_run.log</option>
+                  <option value="all">All logs</option>
+                </select>
+                <label class="checkbox">
+                  <input id="log-auto-scroll" type="checkbox" checked>
+                  Auto-scroll
+                </label>
+                <button type="button" id="refresh-logs-btn" class="secondary-btn">Refresh</button>
               </div>
             </div>
+            <pre id="worker-logs" class="worker-logs muted">No logs yet. Start a search to see bot worker activity.</pre>
           </div>
         </div>
       </section>
@@ -124,6 +194,48 @@
         <button type="button" id="go-settings-btn" class="secondary-btn">Open Settings</button>
         <button type="button" id="cancel-find-jobs" class="secondary-btn">Cancel</button>
         <button type="button" id="confirm-find-jobs" class="primary-btn">Start Search</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="auth-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-content auth-modal-content">
+      <h2 id="auth-modal-title">Sign in to use the bot</h2>
+      <p id="auth-modal-reason" class="muted">
+        Browse jobs for free. Sign in to run Find Jobs and watch the live Kasm browser.
+      </p>
+      <div class="auth-tabs">
+        <button type="button" class="auth-tab active" data-auth-tab="signin">Sign in</button>
+        <button type="button" class="auth-tab" data-auth-tab="signup">Sign up</button>
+      </div>
+      <form id="auth-form" class="auth-form">
+        <label>
+          Email
+          <input id="auth-email" type="email" name="email" autocomplete="email" required>
+        </label>
+        <label>
+          Password
+          <input id="auth-password" type="password" name="password" autocomplete="current-password" minlength="8" required>
+        </label>
+        <p id="auth-error" class="auth-error hidden"></p>
+        <div class="modal-actions">
+          <button type="button" id="auth-cancel" class="secondary-btn">Cancel</button>
+          <button type="submit" id="auth-submit" class="primary-btn">Sign in</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="app-confirm-modal" class="modal app-alert-modal hidden" aria-hidden="true">
+    <div class="app-alert-card app-alert-danger" role="alertdialog" aria-modal="true" aria-labelledby="app-confirm-title">
+      <div class="app-alert-icon" aria-hidden="true">!</div>
+      <div class="app-alert-body">
+        <h3 id="app-confirm-title">Confirm</h3>
+        <p id="app-confirm-message" class="muted"></p>
+      </div>
+      <div class="app-alert-actions">
+        <button type="button" id="app-confirm-cancel" class="secondary-btn">Cancel</button>
+        <button type="button" id="app-confirm-ok" class="danger-btn">Delete</button>
       </div>
     </div>
   </div>
