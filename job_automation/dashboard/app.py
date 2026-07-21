@@ -31,7 +31,7 @@ from job_automation.models.domain import Decision
 from job_automation.paths import PROJECT_ROOT
 from job_automation.storage.database import init_db, session_scope
 from job_automation.storage.models import UserRow
-from job_automation.storage.repositories import JobRepository, PortalRunRepository
+from job_automation.storage.repositories import JobRepository, PortalCredentialRepository, PortalRunRepository
 
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -53,13 +53,14 @@ class JobDeleteRequest(BaseModel):
 
 class CredentialSaveRequest(BaseModel):
     username: str
-    password: str
+    password: str | None = None
     login_url: str | None = None
     email_app_password: str | None = None
 
 
 class PortalCredentialPayload(CredentialSaveRequest):
     portal: str
+    password: str = ""
 
 
 class SearchStartRequest(BaseModel):
@@ -134,6 +135,7 @@ def create_app() -> FastAPI:
             "search_start": "/api/search/start",
             "search_stop": "/api/search/stop",
             "auth": "/api/auth/me",
+            "credentials": "/api/credentials",
             "credentials_sessions": "/api/credentials/sessions",
             "portals": list(SUPPORTED_PORTALS),
         }
@@ -178,8 +180,17 @@ def create_app() -> FastAPI:
         _clear_session_cookie(response)
         return {"authenticated": False}
 
+    @app.get("/api/credentials")
+    async def list_credentials(request: Request) -> dict[str, Any]:
+        user = await require_user(request)
+        async with session_scope() as session:
+            repo = PortalCredentialRepository(session)
+            portals = await repo.list_status(user.id)
+        return {"portals": portals, "supported_portals": list(SUPPORTED_PORTALS)}
+
     @app.get("/api/credentials/sessions")
-    async def credential_sessions() -> dict[str, Any]:
+    async def credential_sessions(request: Request) -> dict[str, Any]:
+        await require_user(request)
         from job_automation.paths import SESSIONS_DIR
 
         return {
@@ -193,30 +204,56 @@ def create_app() -> FastAPI:
         }
 
     @app.put("/api/credentials/{portal}")
-    async def save_credentials(portal: str, payload: CredentialSaveRequest) -> dict[str, Any]:
+    async def save_credentials(
+        portal: str, payload: CredentialSaveRequest, request: Request
+    ) -> dict[str, Any]:
+        user = await require_user(request)
         if portal not in SUPPORTED_PORTALS:
             raise HTTPException(status_code=400, detail=f"Unsupported portal: {portal}")
-        store = CredentialStore()
-        store.save(
-            portal,
-            PortalCredential(
-                username=payload.username.strip(),
-                password=payload.password,
-                login_url=payload.login_url,
-                email_app_password=payload.email_app_password,
-            ),
-        )
-        return {"portal": portal, "saved": True, "username": payload.username.strip()}
+        username = payload.username.strip()
+        if not username:
+            raise HTTPException(status_code=400, detail="Username is required")
+        password = payload.password if payload.password else None
+        try:
+            async with session_scope() as session:
+                repo = PortalCredentialRepository(session)
+                existing = await repo.get(user.id, portal)
+                if existing is None and not password and portal != "builtin":
+                    raise HTTPException(status_code=400, detail="Password is required")
+                row = await repo.upsert(
+                    user.id,
+                    portal,
+                    username=username,
+                    password=password or ("magic-link-placeholder" if portal == "builtin" and not existing else None),
+                    login_url=(payload.login_url.strip() if payload.login_url else None),
+                    email_app_password=payload.email_app_password or None,
+                )
+                # Also stage into runner CredentialStore for immediate use.
+                cred = repo.to_portal_credential(row)
+                CredentialStore().save(portal, cred)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "portal": portal,
+            "saved": True,
+            "username": username,
+            "stored_on": "account",
+        }
 
     @app.delete("/api/credentials/{portal}")
-    async def delete_credentials(portal: str) -> dict[str, Any]:
+    async def delete_credentials(portal: str, request: Request) -> dict[str, Any]:
+        user = await require_user(request)
         if portal not in SUPPORTED_PORTALS:
             raise HTTPException(status_code=400, detail=f"Unsupported portal: {portal}")
+        async with session_scope() as session:
+            deleted = await PortalCredentialRepository(session).delete(user.id, portal)
+        # Clear machine runner cache for this portal too.
         CredentialStore().delete(portal)
-        return {"portal": portal, "deleted": True}
+        return {"portal": portal, "deleted": deleted}
 
     @app.delete("/api/credentials/sessions/{portal}")
-    async def delete_session(portal: str) -> dict[str, Any]:
+    async def delete_session(portal: str, request: Request) -> dict[str, Any]:
+        await require_user(request)
         if portal not in SUPPORTED_PORTALS:
             raise HTTPException(status_code=400, detail=f"Unsupported portal: {portal}")
         from job_automation.paths import SESSIONS_DIR
@@ -256,9 +293,24 @@ def create_app() -> FastAPI:
 
     @app.post("/api/search/start")
     async def search_start(request: Request, payload: SearchStartRequest) -> dict[str, Any]:
-        await require_user(request)
+        user = await require_user(request)
         if payload.credentials:
             save_credentials_for_search([cred.model_dump() for cred in payload.credentials])
+        else:
+            # Load portal logins saved on this JobSeek account.
+            async with session_scope() as session:
+                repo = PortalCredentialRepository(session)
+                rows = await repo.list_for_user(user.id)
+                if rows:
+                    save_credentials_for_search(
+                        [
+                            {
+                                "portal": row.portal,
+                                **repo.to_portal_credential(row).model_dump(),
+                            }
+                            for row in rows
+                        ]
+                    )
         try:
             return schedule_search(
                 payload.portals,
@@ -456,6 +508,12 @@ def create_app() -> FastAPI:
 
 def _serialize_job(row, *, include_description: bool = False) -> dict[str, Any]:
     evidence = json.loads(row.evidence_json) if row.evidence_json else []
+    skills_required = _evidence_list_value(evidence, "skills_required")
+    match_background = (
+        _evidence_text_value(evidence, "requirements_summary")
+        or _evidence_text_value(evidence, "match_background")
+        or getattr(row, "company_headline", None)
+    )
     data = {
         "id": row.id,
         "source_portal": row.source_portal,
@@ -464,14 +522,22 @@ def _serialize_job(row, *, include_description: bool = False) -> dict[str, Any]:
         "company_url": row.company_url,
         "company_headline": getattr(row, "company_headline", None),
         "location": row.location,
+        "location_eligible": getattr(row, "location_eligible", None),
         "remote_policy": row.remote_policy,
+        "remote_eligible": getattr(row, "remote_eligible", None),
         "work_type": getattr(row, "work_type", None),
+        "commitment": getattr(row, "commitment", None),
         "experience_level": row.experience_level,
         "industry": row.industry,
         "salary_text": row.salary_text,
         "posted_text": getattr(row, "posted_text", None),
+        "posted_at": f"{row.posted_at.isoformat()}Z" if getattr(row, "posted_at", None) else None,
+        "is_reposted": bool(getattr(row, "is_reposted", False)),
+        "skills_required": skills_required,
+        "match_background": match_background,
         "decision": row.decision,
         "decision_reason": row.decision_reason,
+        "status": row.status or "new",
         "apply_url": row.apply_url,
         "job_url": row.job_url,
         "created_at": f"{row.created_at.isoformat()}Z" if row.created_at else None,
@@ -481,3 +547,34 @@ def _serialize_job(row, *, include_description: bool = False) -> dict[str, Any]:
     if include_description:
         data["description_text"] = row.description_text
     return data
+
+
+def _evidence_text_value(evidence: list[Any], field: str) -> str | None:
+    for item in evidence or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("field") or "").lower() != field:
+            continue
+        text = item.get("evidence_text") or item.get("value")
+        if text is None:
+            return None
+        if isinstance(text, list):
+            return ", ".join(str(part) for part in text if part)
+        return str(text)
+    return None
+
+
+def _evidence_list_value(evidence: list[Any], field: str) -> list[str]:
+    for item in evidence or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("field") or "").lower() != field:
+            continue
+        value = item.get("value")
+        if isinstance(value, list):
+            return [str(part).strip() for part in value if str(part).strip()]
+        text = item.get("evidence_text") or value
+        if not text:
+            return []
+        return [part.strip() for part in re.split(r"\s*,\s*", str(text)) if part.strip()]
+    return []

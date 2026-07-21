@@ -28,6 +28,9 @@ class PortalCredentialStatus(BaseModel):
     portal: str
     configured: bool
     username: str | None = None
+    login_url: str | None = None
+    has_password: bool = False
+    has_email_app_password: bool = False
     has_session: bool = False
 
 
@@ -50,6 +53,20 @@ def _get_fernet():
         except OSError:
             pass
     return Fernet(key)
+
+
+def encrypt_secret(value: str | None) -> str | None:
+    if value is None:
+        return None
+    fernet = _get_fernet()
+    return fernet.encrypt(value.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_secret(value: str | None) -> str | None:
+    if not value:
+        return None
+    fernet = _get_fernet()
+    return fernet.decrypt(value.encode("utf-8")).decode("utf-8")
 
 
 class CredentialStore:

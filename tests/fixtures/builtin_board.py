@@ -29,6 +29,9 @@ BUILTIN_LIST_HTML = """
     <button id="job-dropdown-button" type="button" class="dropdown">Expand</button>
     <button type="button" aria-label="Save job" class="heart">Heart</button>
     <div class="mb-md fs-xs fw-bold industry" style="display:none">Cybersecurity</div>
+    <div class="fs-sm fw-regular requirements-summary" style="display:none">
+      Build secure platforms for enterprise customers with strong Python and cloud skills.
+    </div>
     <div class="border rounded-2 mt-md p-sm">
       <span class="fs-xs fw-bold text-uppercase">Top Skills:</span>
       <span class="d-md-inline ps-md-sm">
@@ -47,6 +50,9 @@ BUILTIN_LIST_HTML = """
     <button id="job-dropdown-button" type="button" class="dropdown">Expand</button>
     <button type="button" aria-label="Save job" class="heart">Heart</button>
     <div class="mb-md fs-xs fw-bold industry" style="display:none">Software</div>
+    <div class="fs-sm fw-regular requirements-summary" style="display:none">
+      Ship device OS UI with TypeScript and React for a fully remote US team.
+    </div>
     <div class="border rounded-2 mt-md p-sm">
       <span class="fs-xs fw-bold text-uppercase">Top Skills:</span>
       <span class="d-md-inline ps-md-sm">
@@ -65,6 +71,9 @@ BUILTIN_LIST_HTML = """
     <button id="job-dropdown-button" type="button" class="dropdown">Expand</button>
     <button type="button" aria-label="Save job" class="heart">Heart</button>
     <div class="mb-md fs-xs fw-bold industry" style="display:none">Internet</div>
+    <div class="fs-sm fw-regular requirements-summary" style="display:none">
+      Build Python services for a consumer internet product.
+    </div>
   </div>
 
   <script>
@@ -94,7 +103,10 @@ BUILTIN_LIST_HTML = """
     });
     document.querySelectorAll('.dropdown').forEach((btn) => {
       btn.addEventListener('click', () => {
-        btn.parentElement.querySelector('.industry').style.display = 'block';
+        const card = btn.parentElement;
+        card.querySelector('.industry').style.display = 'block';
+        const summary = card.querySelector('.requirements-summary');
+        if (summary) summary.style.display = 'block';
       });
     });
     document.querySelectorAll('.heart').forEach((btn) => {

@@ -63,6 +63,8 @@ let logPollTimer = null;
 let currentUser = null;
 let authMode = "signin";
 let authNextAction = null;
+/** @type {Map<string, { company: string, jobs: any[], index: number }>} */
+const jobStacks = new Map();
 
 const DECISION_LABELS = {
   eligible: "Enable",
@@ -191,7 +193,61 @@ document.querySelectorAll(".nav-item").forEach((btn) => {
       loadRuns();
       loadWorkerLogs();
     }
+    closeNavDrawer();
+    closeJobsFiltersDrawer();
   });
+});
+
+const appShell = document.querySelector(".app");
+const navBackdrop = document.getElementById("nav-drawer-backdrop");
+const filtersBackdrop = document.getElementById("jobs-filters-backdrop");
+const openNavMenuBtn = document.getElementById("open-nav-menu");
+const closeNavMenuBtn = document.getElementById("close-nav-menu");
+const editSearchCriteriaBtn = document.getElementById("edit-search-criteria");
+const closeJobsFiltersBtn = document.getElementById("close-jobs-filters");
+
+function openNavDrawer() {
+  closeJobsFiltersDrawer();
+  appShell?.classList.add("nav-open");
+  openNavMenuBtn?.setAttribute("aria-expanded", "true");
+  if (navBackdrop) navBackdrop.hidden = false;
+}
+
+function closeNavDrawer() {
+  appShell?.classList.remove("nav-open");
+  openNavMenuBtn?.setAttribute("aria-expanded", "false");
+  if (navBackdrop) navBackdrop.hidden = true;
+}
+
+function openJobsFiltersDrawer() {
+  closeNavDrawer();
+  appShell?.classList.add("filters-open");
+  if (filtersBackdrop) filtersBackdrop.hidden = false;
+}
+
+function closeJobsFiltersDrawer() {
+  appShell?.classList.remove("filters-open");
+  if (filtersBackdrop) filtersBackdrop.hidden = true;
+}
+
+openNavMenuBtn?.addEventListener("click", () => {
+  if (appShell?.classList.contains("nav-open")) closeNavDrawer();
+  else openNavDrawer();
+});
+closeNavMenuBtn?.addEventListener("click", closeNavDrawer);
+navBackdrop?.addEventListener("click", closeNavDrawer);
+
+editSearchCriteriaBtn?.addEventListener("click", openJobsFiltersDrawer);
+closeJobsFiltersBtn?.addEventListener("click", closeJobsFiltersDrawer);
+filtersBackdrop?.addEventListener("click", closeJobsFiltersDrawer);
+
+window.addEventListener("resize", () => {
+  if (window.innerWidth > 1400) {
+    closeJobsFiltersDrawer();
+  }
+  if (window.innerWidth > 1100) {
+    closeNavDrawer();
+  }
 });
 
 document.getElementById("refresh-runs-btn")?.addEventListener("click", () => {
@@ -347,6 +403,7 @@ function renderAuthSlot() {
       currentUser = null;
       renderAuthSlot();
       renderKasmLinks([]);
+      await loadCredentials();
       showCredentialToast("Signed out.", "success");
     });
     return;
@@ -417,8 +474,11 @@ async function submitAuthForm() {
     const next = authNextAction;
     closeAuthModal();
     showCredentialToast(authMode === "signup" ? "Account created." : "Signed in.", "success");
+    await loadCredentials();
     if (next === "find-jobs") {
       await openFindJobsModal();
+    } else if (next === "settings") {
+      showView("settings");
     } else if (typeof next === "string" && next.startsWith("/")) {
       window.location.href = next;
     }
@@ -532,13 +592,16 @@ async function loadJobs() {
   if (jobsTotalCount) jobsTotalCount.textContent = formatCount(total);
   if (jobsCompanyCount) jobsCompanyCount.textContent = formatCount(companies);
   visibleJobIds = (data.jobs || []).map((job) => Number(job.id));
+  jobStacks.clear();
 
   if (activeEntity === "companies") {
-    jobsList.className = "jobs-companies";
-    jobsList.innerHTML = renderJobsByCompany(data.jobs) || "<div class='muted jobs-empty'>No jobs found.</div>";
+    jobsList.className = "jobs-grid";
+    jobsList.innerHTML =
+      renderJobsByCompany(data.jobs) || "<div class='muted jobs-empty'>No jobs found.</div>";
   } else {
     jobsList.className = "jobs-grid";
-    jobsList.innerHTML = data.jobs.map(renderJobCard).join("") || "<div class='muted jobs-empty'>No jobs found.</div>";
+    jobsList.innerHTML =
+      renderGroupedJobCards(data.jobs) || "<div class='muted jobs-empty'>No jobs found.</div>";
   }
 
   renderPagination(data.total, data.page, data.page_size);
@@ -550,24 +613,40 @@ function formatCount(value) {
   return Number(value || 0).toLocaleString();
 }
 
-function renderJobsByCompany(jobs) {
+function companyKey(name) {
+  return String(name || "Unknown company")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function groupJobsByCompany(jobs) {
   const groups = new Map();
-  for (const job of jobs) {
+  for (const job of jobs || []) {
     const company = job.company || "Unknown company";
-    if (!groups.has(company)) groups.set(company, []);
-    groups.get(company).push(job);
+    const key = companyKey(company);
+    if (!groups.has(key)) groups.set(key, { company, jobs: [] });
+    groups.get(key).jobs.push(job);
   }
-  return Array.from(groups.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(
-      ([company, items]) => `
-      <div class="company-group">
-        <h3 class="company-group-title">${escapeHtml(company)} · ${items.length}</h3>
-        <div class="jobs-grid">
-          ${items.map(renderJobCard).join("")}
-        </div>
-      </div>`
-    )
+  return Array.from(groups.entries());
+}
+
+function renderGroupedJobCards(jobs) {
+  return groupJobsByCompany(jobs)
+    .map(([key, group]) => {
+      jobStacks.set(key, { company: group.company, jobs: group.jobs, index: 0 });
+      return renderCompanyStackCard(key, group.jobs, 0);
+    })
+    .join("");
+}
+
+function renderJobsByCompany(jobs) {
+  return groupJobsByCompany(jobs)
+    .sort(([, a], [, b]) => a.company.localeCompare(b.company))
+    .map(([key, group]) => {
+      jobStacks.set(key, { company: group.company, jobs: group.jobs, index: 0 });
+      return renderCompanyStackCard(key, group.jobs, 0);
+    })
     .join("");
 }
 
@@ -596,58 +675,144 @@ function relativeTime(iso) {
   const then = new Date(normalized).getTime();
   if (Number.isNaN(then)) return "";
   const diffSec = Math.max(0, Math.floor((Date.now() - then) / 1000));
-  if (diffSec < 60) return `${Math.max(diffSec, 1)}s`;
+  if (diffSec < 60) return "Just Now";
   const mins = Math.floor(diffSec / 60);
-  if (mins < 60) return `${mins}m`;
+  if (mins < 60) return `${mins} ${mins === 1 ? "Minute" : "Minutes"} Ago`;
   const hours = Math.floor(mins / 60);
-  if (hours < 48) return `${hours}h`;
+  if (hours < 48) return `${hours} ${hours === 1 ? "Hour" : "Hours"} Ago`;
   const days = Math.floor(hours / 24);
-  if (days < 14) return `${days}d`;
+  if (days < 60) return `${days} ${days === 1 ? "Day" : "Days"} Ago`;
   return new Date(normalized).toLocaleDateString();
 }
 
-function renderJobCard(job) {
+function formatPostedLabel(job) {
+  if (!job) return "";
+  const when = job.posted_at || job.created_at;
+  if (!when) return job.posted_text || "";
+  const distance = relativeTime(when);
+  if (!distance) return job.posted_text || "";
+  if (/^(Posted|Reposted)\b/i.test(distance)) return distance;
+  const prefix = job.is_reposted ? "Reposted" : "Posted";
+  if (/^just now$/i.test(distance)) return `${prefix} Just Now`;
+  return `${prefix} ${distance}`;
+}
+
+function renderCompanyStackCard(stackKey, jobs, index) {
+  const safeIndex = Math.max(0, Math.min(index, jobs.length - 1));
+  const job = jobs[safeIndex];
+  if (!job) return "";
   const checked = selectedJobIds.has(job.id);
   const selectedClass = selectedJobId === job.id && !selectionMode ? "selected" : "";
   const checkedClass = checked ? "checked" : "";
   const selectClass = selectionMode ? "select-mode" : "";
+  const stackedClass = jobs.length > 1 ? "job-card-stacked" : "";
+  const stackDepth = Math.min(jobs.length - 1, 2);
+
+  return `
+    <article
+      class="job-card ${stackedClass} ${selectedClass} ${checkedClass} ${selectClass}"
+      data-job-id="${job.id}"
+      data-stack-key="${escapeHtml(stackKey)}"
+      data-stack-index="${safeIndex}"
+      data-stack-count="${jobs.length}"
+      style="${jobs.length > 1 ? `--stack-depth: ${stackDepth}` : ""}"
+    >
+      ${jobs.length > 1 ? `<div class="job-card-stack-shadow" aria-hidden="true"></div>` : ""}
+      ${renderJobCardBody(job, stackKey, safeIndex, jobs.length)}
+    </article>
+  `;
+}
+
+function renderJobCardBody(job, stackKey, index, stackCount) {
   const company = job.company || "Unknown company";
   const location = job.location || "Remote / Unknown";
   const salary = job.salary_text || "";
-  const workType = job.work_type || "";
   const level = job.experience_level || "";
-  const remote = job.remote_policy || "";
   const reason = job.decision_reason || "";
-  const postingUrl = job.apply_url || job.job_url || "";
-  const posted = job.posted_text || relativeTime(job.created_at);
-  const headline = job.company_headline || "";
+  const applyUrl = job.apply_url || "";
+  const jobUrl = job.job_url || "";
+  const companyUrl = job.company_url || "";
+  const status = String(job.status || "new").toLowerCase();
+  const decision = String(job.decision || "").toLowerCase();
+  const posted = formatPostedLabel(job);
   const industry = job.industry || "";
+  const requirements =
+    job.match_background ||
+    job.company_headline ||
+    evidenceText(job.evidence, "skill_match") ||
+    (decision === "eligible" ? reason : "") ||
+    "";
+  const skills = Array.isArray(job.skills_required)
+    ? job.skills_required
+    : skillsFromEvidence(job.evidence);
+  const isSaved = status === "saved" || status === "applied";
+  const isApplied = status === "applied";
+  const showSnippet = decision === "needs_review" || decision === "rejected";
 
-  const tags = [];
-  if (salary) tags.push(`<span class="job-tag salary">${escapeHtml(salary)}</span>`);
-  if (workType) tags.push(`<span class="job-tag">${escapeHtml(workType)}</span>`);
-  else if (remote) tags.push(`<span class="job-tag">${escapeHtml(remote)}</span>`);
-  if (level) tags.push(`<span class="job-tag">${escapeHtml(level)}</span>`);
-  if (job.decision) {
-    tags.push(
-      `<span class="job-tag decision ${escapeHtml(job.decision)}">${escapeHtml(decisionLabel(job.decision))}</span>`
+  const metaTags = [];
+  if (salary && salary !== "Not listed") {
+    metaTags.push(`<span class="job-tag salary">${escapeHtml(salary)}</span>`);
+  }
+  if (level) metaTags.push(`<span class="job-tag">${escapeHtml(level)}</span>`);
+  if (job.source_portal) {
+    metaTags.push(
+      `<span class="job-tag portal">${escapeHtml(PORTAL_LABELS[job.source_portal] || job.source_portal)}</span>`
     );
   }
-  if (job.source_portal) {
-    tags.push(`<span class="job-tag portal">${escapeHtml(PORTAL_LABELS[job.source_portal] || job.source_portal)}</span>`);
-  }
+  if (isApplied) metaTags.push(`<span class="job-tag status-applied">Applied</span>`);
+  else if (isSaved) metaTags.push(`<span class="job-tag status-saved">Saved</span>`);
 
-  const companySub = headline || industry || (job.source_portal ? PORTAL_LABELS[job.source_portal] || job.source_portal : "Collected role");
+  const skillTags = skills
+    .slice(0, 6)
+    .map((skill) => `<span class="job-tag skill">${escapeHtml(skill)}</span>`)
+    .join("");
+
+  const pager =
+    stackCount > 5
+      ? `<span class="job-stack-counter">${index + 1} / ${stackCount}</span>`
+      : `<div class="job-stack-dots" role="tablist" aria-label="Jobs at ${escapeHtml(company)}">
+          ${Array.from({ length: stackCount }, (_, i) =>
+            `<button type="button" class="job-stack-dot ${i === index ? "active" : ""}" data-stack-key="${escapeHtml(stackKey)}" data-stack-index="${i}" aria-label="Job ${i + 1} of ${stackCount}"></button>`
+          ).join("")}
+        </div>`;
+  const slider =
+    stackCount > 1
+      ? `
+      <div class="job-stack-slider" onclick="event.stopPropagation()">
+        <button type="button" class="job-stack-nav job-stack-prev" data-stack-key="${escapeHtml(stackKey)}" aria-label="Previous job">‹</button>
+        ${pager}
+        <button type="button" class="job-stack-nav job-stack-next" data-stack-key="${escapeHtml(stackKey)}" aria-label="Next job">›</button>
+      </div>`
+      : "";
 
   return `
-    <article class="job-card ${selectedClass} ${checkedClass} ${selectClass}" data-job-id="${job.id}">
       ${
         selectionMode
           ? `<label class="job-select" onclick="event.stopPropagation()">
-              <input type="checkbox" class="job-select-input" data-job-id="${job.id}" ${checked ? "checked" : ""}>
+              <input type="checkbox" class="job-select-input" data-job-id="${job.id}" ${selectedJobIds.has(job.id) ? "checked" : ""}>
             </label>`
           : ""
       }
+      <div class="job-card-hover">
+        <div class="job-hover-top">
+          <button type="button" class="job-tool-btn save ${isSaved ? "active" : ""}" data-action="save" data-job-id="${job.id}">${isSaved ? "Saved" : "Save"}</button>
+          <button type="button" class="job-tool-btn applied ${isApplied ? "active" : ""}" data-action="applied" data-job-id="${job.id}">${isApplied ? "Applied" : "Mark Applied"}</button>
+        </div>
+        ${
+          companyUrl
+            ? `<a class="job-icon-btn company-web job-hover-company" href="${escapeHtml(companyUrl)}" target="_blank" rel="noopener noreferrer" title="Company website" aria-label="Visit company website"></a>`
+            : ""
+        }
+        <div class="job-hover-bottom">
+          ${
+            applyUrl
+              ? `<a class="job-tool-btn apply" href="${escapeHtml(applyUrl)}" target="_blank" rel="noopener noreferrer">Apply Directly</a>`
+              : `<span class="job-tool-btn apply disabled" title="No apply link">Apply Directly</span>`
+          }
+          <button type="button" class="job-icon-btn hide" data-action="hide" data-job-id="${job.id}" title="Hide job" aria-label="Hide job"></button>
+        </div>
+      </div>
+      <div class="job-card-body">
       <div class="job-card-top">
         <h3 class="job-title">${escapeHtml(job.title || "Untitled")}</h3>
         ${posted ? `<span class="job-posted">${escapeHtml(posted)}</span>` : ""}
@@ -656,42 +821,290 @@ function renderJobCard(job) {
         <span class="job-location-icon" aria-hidden="true"></span>
         <span>${escapeHtml(location)}</span>
       </div>
-      ${tags.length ? `<div class="job-tags">${tags.join("")}</div>` : ""}
+      ${
+        decision
+          ? `<div class="job-status-row"><span class="job-tag decision ${escapeHtml(decision)}">${escapeHtml(decisionLabel(decision))}</span></div>`
+          : ""
+      }
+      ${metaTags.length ? `<div class="job-tags">${metaTags.join("")}</div>` : ""}
       <div class="job-company">
         <div class="job-company-avatar" aria-hidden="true">${escapeHtml(companyInitials(company))}</div>
         <div class="job-company-meta">
-          <div class="job-company-name">${escapeHtml(company)}</div>
-          <div class="job-company-sub">${escapeHtml(companySub)}</div>
+          <div class="job-company-name">${escapeHtml(company)}${stackCount > 1 ? ` <span class="job-stack-count">· ${stackCount}</span>` : ""}</div>
+          ${industry ? `<div class="job-company-sub">${escapeHtml(industry)}</div>` : ""}
         </div>
       </div>
       ${
-        reason
-          ? `<p class="job-snippet"><span class="job-snippet-icon" aria-hidden="true"></span>${escapeHtml(reason)}</p>`
+        requirements
+          ? `<p class="job-requirements">${escapeHtml(requirements)}</p>`
           : ""
       }
+      ${skillTags ? `<div class="job-tags job-skills">${skillTags}</div>` : ""}
+      ${
+        showSnippet && reason
+          ? `<p class="job-snippet"><span class="job-snippet-icon" aria-hidden="true">!</span><span class="job-snippet-text">${escapeHtml(reason)}</span></p>`
+          : ""
+      }
+      </div>
       <div class="job-card-footer">
         ${
-          postingUrl
-            ? `<a class="job-posting-link" href="${escapeHtml(postingUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">Job Posting</a>`
-            : `<span class="muted">No posting link</span>`
+          jobUrl
+            ? `<a class="job-posting-link" href="${escapeHtml(jobUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">Job Posting</a>`
+            : applyUrl
+              ? `<a class="job-posting-link" href="${escapeHtml(applyUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">Job Posting</a>`
+              : `<span class="muted">No posting link</span>`
         }
-        <button type="button" class="job-view-btn" data-job-id="${job.id}">View details</button>
+        ${slider}
+        <button type="button" class="job-view-all-btn" data-stack-key="${escapeHtml(stackKey)}" data-job-id="${job.id}">View all</button>
       </div>
-      <div class="job-card-actions" aria-hidden="true">
-        <button type="button" class="job-action primary job-view-btn" data-job-id="${job.id}">View details</button>
-        ${
-          postingUrl
-            ? `<a class="job-action" href="${escapeHtml(postingUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">Apply Directly</a>`
-            : ""
-        }
-      </div>
-    </article>
   `;
+}
+
+function skillsFromEvidence(evidence) {
+  if (!Array.isArray(evidence)) return [];
+  const item = evidence.find((entry) => String(entry?.field || "").toLowerCase() === "skills_required");
+  if (!item) return [];
+  if (Array.isArray(item.value)) {
+    return item.value.map((part) => String(part).trim()).filter(Boolean);
+  }
+  const text = item.evidence_text || item.value;
+  if (!text) return [];
+  return String(text)
+    .split(/\s*,\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function evidenceText(evidence, field) {
+  if (!Array.isArray(evidence)) return "";
+  const item = evidence.find((entry) => String(entry?.field || "").toLowerCase() === field);
+  if (!item) return "";
+  const text = item.evidence_text || item.value;
+  if (Array.isArray(text)) return text.map((part) => String(part).trim()).filter(Boolean).join(", ");
+  return text ? String(text) : "";
+}
+
+function setCompanyStackIndex(stackKey, nextIndex) {
+  const stack = jobStacks.get(stackKey);
+  if (!stack || !stack.jobs.length) return;
+  const index = ((nextIndex % stack.jobs.length) + stack.jobs.length) % stack.jobs.length;
+  stack.index = index;
+  const card = document.querySelector(`.job-card[data-stack-key="${cssEscape(stackKey)}"]`);
+  if (!card) return;
+  const wrapper = document.createElement("div");
+  wrapper.innerHTML = renderCompanyStackCard(stackKey, stack.jobs, index).trim();
+  const nextCard = wrapper.firstElementChild;
+  if (!nextCard) return;
+  card.replaceWith(nextCard);
+  bindOneJobCard(nextCard);
+  bindStackControls(nextCard);
+}
+
+function syncJobInStacks(jobId, patch) {
+  const id = Number(jobId);
+  for (const stack of jobStacks.values()) {
+    const job = stack.jobs.find((item) => Number(item.id) === id);
+    if (job) Object.assign(job, patch);
+  }
+}
+
+async function patchJobFields(jobId, fields) {
+  const response = await fetch(`/api/jobs/${jobId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || "Failed to update job");
+  }
+  return response.json();
+}
+
+async function handleJobCardAction(action, jobId, card) {
+  const id = Number(jobId || card?.dataset.jobId);
+  if (!id) return;
+  const stackKey = card?.dataset.stackKey;
+  const stack = stackKey ? jobStacks.get(stackKey) : null;
+  const current = stack?.jobs.find((job) => Number(job.id) === id) || { id, status: "new" };
+  const status = String(current.status || "new").toLowerCase();
+
+  try {
+    if (action === "save") {
+      // new -> saved; saved -> new; applied stays applied (already counts as saved).
+      if (status === "applied") return;
+      const finalStatus = status === "saved" ? "new" : "saved";
+      const updated = await patchJobFields(id, { status: finalStatus });
+      syncJobInStacks(id, { status: updated.status || finalStatus });
+      if (stackKey) setCompanyStackIndex(stackKey, stack?.index || 0);
+      else await loadJobs();
+      return;
+    }
+    if (action === "applied") {
+      const finalStatus = status === "applied" ? "saved" : "applied";
+      const updated = await patchJobFields(id, { status: finalStatus });
+      syncJobInStacks(id, { status: updated.status || finalStatus });
+      if (stackKey) setCompanyStackIndex(stackKey, stack?.index || 0);
+      else await loadJobs();
+      return;
+    }
+    if (action === "hide") {
+      await patchJobFields(id, { status: "hidden" });
+      if (stack && stackKey) {
+        const idx = stack.jobs.findIndex((job) => Number(job.id) === id);
+        if (idx >= 0) stack.jobs.splice(idx, 1);
+        if (!stack.jobs.length) {
+          jobStacks.delete(stackKey);
+          card?.remove();
+          await loadJobs();
+          return;
+        }
+        const nextIndex = Math.min(idx, stack.jobs.length - 1);
+        setCompanyStackIndex(stackKey, nextIndex);
+        return;
+      }
+      await loadJobs();
+    }
+  } catch (error) {
+    alert(error.message || "Action failed");
+  }
+}
+
+function cssEscape(value) {
+  if (window.CSS?.escape) return window.CSS.escape(value);
+  return String(value).replace(/"/g, '\\"');
+}
+
+function bindStackControls(root = document) {
+  root.querySelectorAll?.(".job-stack-prev").forEach((btn) => {
+    btn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const key = btn.dataset.stackKey;
+      const stack = jobStacks.get(key);
+      if (!stack) return;
+      setCompanyStackIndex(key, stack.index - 1);
+    });
+  });
+  root.querySelectorAll?.(".job-stack-next").forEach((btn) => {
+    btn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const key = btn.dataset.stackKey;
+      const stack = jobStacks.get(key);
+      if (!stack) return;
+      setCompanyStackIndex(key, stack.index + 1);
+    });
+  });
+  root.querySelectorAll?.(".job-stack-dot").forEach((btn) => {
+    btn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const key = btn.dataset.stackKey;
+      const index = Number(btn.dataset.stackIndex || 0);
+      setCompanyStackIndex(key, index);
+    });
+  });
+}
+
+function bindOneJobCard(card) {
+  let pressTimer = null;
+  let longPressTriggered = false;
+
+  const clearPress = () => {
+    if (pressTimer) {
+      clearTimeout(pressTimer);
+      pressTimer = null;
+    }
+  };
+
+  const interactiveSelector =
+    "a, button, .job-select, .job-stack-slider, .job-view-all-btn, .job-icon-btn, .job-tool-btn, .job-posting-link, .job-card-footer";
+
+  const startPress = (event) => {
+    if (event.type === "mousedown" && event.button !== 0) return;
+    if (event.target.closest(interactiveSelector)) return;
+    longPressTriggered = false;
+    clearPress();
+    pressTimer = setTimeout(() => {
+      longPressTriggered = true;
+      const id = Number(card.dataset.jobId);
+      if (selectionMode) {
+        toggleJobSelection(id, true);
+      } else {
+        enterSelectionMode(id);
+      }
+    }, LONG_PRESS_MS);
+  };
+
+  card.addEventListener("mousedown", startPress);
+  card.addEventListener("touchstart", startPress, { passive: true });
+  card.addEventListener("mouseup", clearPress);
+  card.addEventListener("mouseleave", clearPress);
+  card.addEventListener("touchend", clearPress);
+  card.addEventListener("touchcancel", clearPress);
+
+  card.addEventListener("click", async (event) => {
+    if (event.target.closest(interactiveSelector)) return;
+    if (longPressTriggered) {
+      longPressTriggered = false;
+      return;
+    }
+    const currentId = Number(card.dataset.jobId);
+    if (selectionMode) {
+      const currentlyChecked = selectedJobIds.has(currentId);
+      toggleJobSelection(currentId, !currentlyChecked);
+      return;
+    }
+    selectedJobId = currentId;
+    document.querySelectorAll(".job-card.selected").forEach((el) => el.classList.remove("selected"));
+    card.classList.add("selected");
+    await openJobDetailScreen(currentId, card.dataset.stackKey);
+  });
+
+  card.querySelector(".job-select-input")?.addEventListener("change", (event) => {
+    toggleJobSelection(Number(event.target.dataset.jobId || card.dataset.jobId), event.target.checked);
+  });
+
+  card.querySelector(".job-card-footer")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+  });
+
+  card.querySelectorAll(".job-view-all-btn").forEach((btn) => {
+    btn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (selectionMode) return;
+      const id = Number(btn.dataset.jobId || card.dataset.jobId);
+      selectedJobId = id;
+      openCompanyJobsModal(btn.dataset.stackKey || card.dataset.stackKey, id);
+    });
+  });
+
+  card.querySelectorAll("[data-action]").forEach((btn) => {
+    btn.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (selectionMode) return;
+      await handleJobCardAction(btn.dataset.action, btn.dataset.jobId || card.dataset.jobId, card);
+    });
+  });
+}
+
+function bindJobCards() {
+  document.querySelectorAll(".job-card").forEach((card) => bindOneJobCard(card));
+  bindStackControls(document);
 }
 
 function updateSelectBar() {
   if (!jobsSelectBar) return;
+  const resultsStats = document.getElementById("jobs-results-stats");
+  const sortWrap = document.getElementById("jobs-sort-wrap");
+  const resultsBar = document.querySelector(".jobs-results-bar");
   jobsSelectBar.classList.toggle("hidden", !selectionMode);
+  resultsStats?.classList.toggle("hidden", selectionMode);
+  sortWrap?.classList.toggle("hidden", selectionMode);
+  resultsBar?.classList.toggle("selecting", selectionMode);
   if (jobsSelectCount) {
     jobsSelectCount.textContent = `${selectedJobIds.size} selected`;
   }
@@ -746,97 +1159,254 @@ function toggleJobSelection(jobId, checked) {
   }
 }
 
-function bindJobCards() {
-  document.querySelectorAll(".job-card").forEach((card) => {
-    const jobId = Number(card.dataset.jobId);
-    let pressTimer = null;
-    let longPressTriggered = false;
-
-    const clearPress = () => {
-      if (pressTimer) {
-        clearTimeout(pressTimer);
-        pressTimer = null;
-      }
-    };
-
-    const startPress = (event) => {
-      if (event.type === "mousedown" && event.button !== 0) return;
-      longPressTriggered = false;
-      clearPress();
-      pressTimer = setTimeout(() => {
-        longPressTriggered = true;
-        enterSelectionMode(jobId);
-      }, LONG_PRESS_MS);
-    };
-
-    card.addEventListener("mousedown", startPress);
-    card.addEventListener("touchstart", startPress, { passive: true });
-    card.addEventListener("mouseup", clearPress);
-    card.addEventListener("mouseleave", clearPress);
-    card.addEventListener("touchend", clearPress);
-    card.addEventListener("touchcancel", clearPress);
-
-    card.addEventListener("click", async (event) => {
-      if (event.target.closest("a, .job-select, .job-action")) return;
-      if (longPressTriggered) {
-        longPressTriggered = false;
-        return;
-      }
-      if (selectionMode) {
-        const currentlyChecked = selectedJobIds.has(jobId);
-        toggleJobSelection(jobId, !currentlyChecked);
-        return;
-      }
-      selectedJobId = jobId;
-      await loadJobDetail(selectedJobId);
-      document.querySelectorAll(".job-card.selected").forEach((el) => el.classList.remove("selected"));
-      card.classList.add("selected");
-    });
-
-    card.querySelector(".job-select-input")?.addEventListener("change", (event) => {
-      toggleJobSelection(jobId, event.target.checked);
-    });
-  });
-
-  document.querySelectorAll(".job-view-btn").forEach((btn) => {
-    btn.addEventListener("click", async (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (selectionMode) return;
-      const jobId = Number(btn.dataset.jobId);
-      selectedJobId = jobId;
-      await loadJobDetail(jobId);
-      document.querySelectorAll(".job-card.selected").forEach((el) => el.classList.remove("selected"));
-      document.querySelector(`.job-card[data-job-id="${jobId}"]`)?.classList.add("selected");
-    });
-  });
-}
-
 function openJobDetailDrawer() {
   const drawer = document.getElementById("job-detail-drawer");
   if (!drawer) return;
   drawer.classList.remove("hidden");
   drawer.setAttribute("aria-hidden", "false");
+  // Next frame so translateX transition plays (HiringCafe right-slide).
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => drawer.classList.add("open"));
+  });
 }
 
 function closeJobDetailDrawer() {
   const drawer = document.getElementById("job-detail-drawer");
-  if (!drawer) return;
-  drawer.classList.add("hidden");
-  drawer.setAttribute("aria-hidden", "true");
+  if (!drawer || drawer.classList.contains("hidden")) return;
+  drawer.classList.remove("open");
+  setTimeout(() => {
+    if (drawer.classList.contains("open")) return;
+    drawer.classList.add("hidden");
+    drawer.setAttribute("aria-hidden", "true");
+  }, 240);
 }
 
-document.getElementById("close-job-detail")?.addEventListener("click", closeJobDetailDrawer);
+function renderCompanyModalJobCard(job, focusedId) {
+  const company = job.company || "Unknown company";
+  const location = job.location || "Remote / Unknown";
+  const salary = job.salary_text || "";
+  const workType = job.work_type || "";
+  const level = job.experience_level || "";
+  const remoteEligible = job.remote_eligible || "";
+  const reason = job.decision_reason || "";
+  const applyUrl = job.apply_url || "";
+  const jobUrl = job.job_url || "";
+  const posted = formatPostedLabel(job);
+  const headline = job.company_headline || "";
+  const industry = job.industry || "";
+  const focused = Number(job.id) === Number(focusedId) ? "focused" : "";
+
+  const tags = [];
+  if (salary && salary !== "Not listed") {
+    tags.push(`<span class="job-tag salary">${escapeHtml(salary)}</span>`);
+  }
+  if (remoteEligible === "Yes" || /remote/i.test(workType || "")) {
+    tags.push(`<span class="job-tag remote">Remote</span>`);
+  } else if (workType) {
+    tags.push(`<span class="job-tag">${escapeHtml(workType)}</span>`);
+  }
+  if (job.commitment) tags.push(`<span class="job-tag">${escapeHtml(job.commitment)}</span>`);
+  if (level) tags.push(`<span class="job-tag">${escapeHtml(level)}</span>`);
+  if (job.decision) {
+    tags.push(
+      `<span class="job-tag decision ${escapeHtml(job.decision)}">${escapeHtml(decisionLabel(job.decision))}</span>`
+    );
+  }
+
+  const companySub =
+    headline ||
+    industry ||
+    (job.source_portal ? PORTAL_LABELS[job.source_portal] || job.source_portal : "Collected role");
+
+  return `
+    <article class="company-job-card ${focused}" data-job-id="${job.id}">
+      <div class="job-card-top">
+        <h3 class="job-title">${escapeHtml(job.title || "Untitled")}</h3>
+        ${posted ? `<span class="job-posted">${escapeHtml(posted)}</span>` : ""}
+      </div>
+      <div class="job-location">
+        <span class="job-location-icon" aria-hidden="true"></span>
+        <span>${escapeHtml(location)}</span>
+      </div>
+      ${tags.length ? `<div class="job-tags">${tags.join("")}</div>` : ""}
+      <div class="job-company">
+        <div class="job-company-avatar" aria-hidden="true">${escapeHtml(companyInitials(company))}</div>
+        <div class="job-company-meta">
+          <div class="job-company-name">${escapeHtml(company)}</div>
+          <div class="job-company-sub">${escapeHtml(companySub)}</div>
+        </div>
+      </div>
+      ${
+        reason
+          ? `<p class="job-snippet"><span class="job-snippet-icon" aria-hidden="true">!</span><span class="job-snippet-text">${escapeHtml(reason)}</span></p>`
+          : ""
+      }
+      <div class="job-card-footer">
+        ${
+          jobUrl || applyUrl
+            ? `<a class="job-posting-link" href="${escapeHtml(jobUrl || applyUrl)}" target="_blank" rel="noopener noreferrer">Job Posting</a>`
+            : `<span class="muted">No posting link</span>`
+        }
+        <button type="button" class="job-view-btn company-job-evidence" data-job-id="${job.id}">View details</button>
+      </div>
+    </article>
+  `;
+}
+
+function openCompanyJobsModal(stackKey, focusJobId) {
+  const modal = document.getElementById("company-jobs-modal");
+  const grid = document.getElementById("company-jobs-grid");
+  const titleEl = document.getElementById("company-jobs-title");
+  const countEl = document.getElementById("company-jobs-count");
+  const footnoteEl = document.getElementById("company-jobs-footnote");
+  const seeAll = document.getElementById("company-jobs-see-all");
+  const avatar = document.getElementById("company-jobs-avatar");
+  if (!modal || !grid) return;
+
+  const stack = stackKey ? jobStacks.get(stackKey) : null;
+  let jobs = stack?.jobs ? [...stack.jobs] : [];
+  if (!jobs.length) {
+    // Fallback: single job from DOM/API stack miss.
+    const card = document.querySelector(`.job-card[data-job-id="${focusJobId}"]`);
+    jobs = card
+      ? [
+          {
+            id: focusJobId,
+            title: card.querySelector(".job-title")?.textContent,
+            company: card.querySelector(".job-company-name")?.textContent?.replace(/·\s*\d+$/, "").trim(),
+          },
+        ]
+      : [];
+  }
+  if (!jobs.length) return;
+
+  const company = stack?.company || jobs[0].company || "Company";
+  const companyUrl = jobs.find((job) => job.company_url)?.company_url || "";
+  titleEl.textContent = company;
+  countEl.textContent = `${jobs.length} job${jobs.length === 1 ? "" : "s"}`;
+  footnoteEl.textContent = `${jobs.length} job${jobs.length === 1 ? "" : "s"} · the company may have more openings`;
+  avatar.textContent = companyInitials(company);
+  seeAll.textContent = `See all jobs at ${company}`;
+  if (companyUrl) {
+    seeAll.href = companyUrl;
+    seeAll.classList.remove("disabled");
+  } else {
+    seeAll.href = "#";
+    seeAll.classList.add("disabled");
+  }
+
+  grid.innerHTML = jobs.map((job) => renderCompanyModalJobCard(job, focusJobId)).join("");
+  grid.querySelectorAll(".company-job-card").forEach((cardEl) => {
+    cardEl.addEventListener("click", async (event) => {
+      if (event.target.closest("a, button")) return;
+      const id = Number(cardEl.dataset.jobId);
+      closeCompanyJobsModal();
+      await openJobDetailScreen(id, stackKey);
+    });
+  });
+  grid.querySelectorAll(".company-job-evidence").forEach((btn) => {
+    btn.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const id = Number(btn.dataset.jobId);
+      closeCompanyJobsModal();
+      await openJobDetailScreen(id, stackKey);
+    });
+  });
+
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  const focused = grid.querySelector(`.company-job-card[data-job-id="${focusJobId}"]`);
+  focused?.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
+function closeCompanyJobsModal() {
+  const modal = document.getElementById("company-jobs-modal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+}
+
+async function deleteJobById(jobId) {
+  const id = Number(jobId);
+  if (!id) return;
+  const ok = await showAppConfirm({
+    title: "Delete this job?",
+    message: "Hold completed — this position will be removed from the database.",
+    confirmLabel: "Delete",
+    cancelLabel: "Cancel",
+    danger: true,
+  });
+  if (!ok) return;
+  selectedJobIds.clear();
+  selectedJobIds.add(id);
+  const response = await fetch("/api/jobs/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ job_ids: [id] }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    showCredentialToast(err.detail || "Failed to delete job", "error");
+    return;
+  }
+  if (selectedJobId === id) {
+    selectedJobId = null;
+    jobDetail.innerHTML = "<div class='muted'>Select a job to inspect evidence and decisions.</div>";
+    closeJobDetailDrawer();
+  }
+  closeCompanyJobsModal();
+  showCredentialToast("Deleted 1 job.", "success");
+  await loadJobs();
+}
+
 document.getElementById("job-detail-backdrop")?.addEventListener("click", closeJobDetailDrawer);
+document.getElementById("close-company-jobs")?.addEventListener("click", closeCompanyJobsModal);
+document.getElementById("company-jobs-modal")?.addEventListener("click", (event) => {
+  if (event.target.id === "company-jobs-modal") closeCompanyJobsModal();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  closeCompanyJobsModal();
+  closeJobDetailDrawer();
+  closeNavDrawer();
+  closeJobsFiltersDrawer();
+});
 
 cancelJobsSelectBtn?.addEventListener("click", () => exitSelectionMode());
 selectAllJobsBtn?.addEventListener("click", () => selectAllVisibleJobs());
 deleteSelectedJobsBtn?.addEventListener("click", () => deleteSelectedJobs());
 
-async function loadJobDetail(jobId) {
+async function openJobDetailScreen(jobId, stackKey = null) {
   const response = await fetch(`/api/jobs/${jobId}`);
+  if (!response.ok) {
+    showCredentialToast("Failed to load job detail", "error");
+    return;
+  }
   const job = await response.json();
-  const evidence = (job.evidence || [])
+  selectedJobId = Number(job.id);
+  const resolvedStackKey = stackKey || companyKey(job.company || "");
+  const status = String(job.status || "new").toLowerCase();
+  const decision = String(job.decision || "").toLowerCase();
+  const isSaved = status === "saved" || status === "applied";
+  const isApplied = status === "applied";
+  const applyUrl = job.apply_url || "";
+  const jobUrl = job.job_url || "";
+  const companyUrl = job.company_url || "";
+  const posted = formatPostedLabel(job);
+  const applyHref = applyUrl || jobUrl;
+  const HIDDEN_EVIDENCE_FIELDS = new Set([
+    "remote_policy",
+    "work_type",
+    "salary",
+    "match_background",
+    "security_related_company_or_role",
+    "role_excluded",
+  ]);
+  const evidenceItems = (job.evidence || []).filter(
+    (item) => !HIDDEN_EVIDENCE_FIELDS.has(String(item.field || "").toLowerCase())
+  );
+  const evidenceHtml = evidenceItems
     .map(
       (item) => `
       <div class="evidence-item">
@@ -846,50 +1416,199 @@ async function loadJobDetail(jobId) {
     )
     .join("");
 
-  const metaBits = [
-    job.location,
-    job.work_type,
-    job.experience_level,
-    job.salary_text,
-    job.posted_text,
-  ].filter(Boolean);
+  const tags = [];
+  if (job.salary_text && job.salary_text !== "Not listed") {
+    tags.push(`<span class="job-tag salary">${escapeHtml(job.salary_text)}</span>`);
+  }
+  if (job.remote_eligible === "Yes" || /remote/i.test(job.work_type || "")) {
+    tags.push(`<span class="job-tag remote">Remote</span>`);
+  } else if (job.work_type) {
+    tags.push(`<span class="job-tag">${escapeHtml(job.work_type)}</span>`);
+  }
+  if (job.commitment) tags.push(`<span class="job-tag">${escapeHtml(job.commitment)}</span>`);
+  if (job.experience_level) tags.push(`<span class="job-tag">${escapeHtml(job.experience_level)}</span>`);
+  if (job.decision) {
+    tags.push(
+      `<span class="job-tag decision ${escapeHtml(job.decision)}">${escapeHtml(decisionLabel(job.decision))}</span>`
+    );
+  }
 
   jobDetail.innerHTML = `
-    <div class="job-title">${escapeHtml(job.title || "Untitled")}</div>
-    <div class="job-meta">
-      ${
-        job.company_url
-          ? `<a href="${escapeHtml(job.company_url)}" target="_blank" rel="noopener">${escapeHtml(job.company || "Company")}</a>`
-          : escapeHtml(job.company || "")
-      }
-      ${metaBits.length ? ` · ${escapeHtml(metaBits.join(" · "))}` : ""}
+    <div class="jd-screen" data-job-id="${job.id}" data-stack-key="${escapeHtml(resolvedStackKey)}">
+      <div class="jd-topbar">
+        <div class="jd-top-left">
+          <span class="jd-mode-pill active">Job</span>
+          <span class="jd-mode-pill muted-pill">Detail</span>
+        </div>
+        <div class="jd-top-actions">
+          <button type="button" id="close-job-detail" class="icon-close-btn" aria-label="Close">×</button>
+        </div>
+      </div>
+
+      <div class="jd-tabs" role="tablist">
+        <button type="button" class="jd-tab active" data-tab="info">Job Info</button>
+        <button type="button" class="jd-tab" data-tab="company">Company Info</button>
+        <button type="button" class="jd-tab" data-tab="description">Job Description</button>
+      </div>
+
+      <div class="jd-body">
+        <p class="jd-posted">${posted ? escapeHtml(posted) : ""}</p>
+        <h1 class="jd-title">${escapeHtml(job.title || "Untitled")}</h1>
+        <p class="jd-company">@ ${escapeHtml(job.company || "Unknown company")}</p>
+        <div class="jd-company-actions">
+          <button type="button" class="jd-link-btn" id="jd-view-all">View All Jobs</button>
+          ${
+            companyUrl
+              ? `<a class="jd-link-btn" href="${escapeHtml(companyUrl)}" target="_blank" rel="noopener noreferrer">Website</a>`
+              : ""
+          }
+        </div>
+        <div class="job-location jd-location">
+          <span class="job-location-icon" aria-hidden="true"></span>
+          <span>${escapeHtml(job.location || "Remote / Unknown")}</span>
+        </div>
+        ${tags.length ? `<div class="job-tags jd-tags">${tags.join("")}</div>` : ""}
+
+        <div class="jd-panel active" data-panel="info">
+          ${
+            job.decision_reason
+              ? `<section class="jd-section"><h3>Summary</h3><p>${escapeHtml(job.decision_reason)}</p></section>`
+              : ""
+          }
+          <section class="jd-section">
+            <h3>Evidence</h3>
+            ${evidenceHtml || "<div class='muted'>No evidence stored.</div>"}
+          </section>
+
+          <section class="jd-actions" aria-label="Job actions">
+            <div class="jd-ai-banner">
+              <div class="jd-ai-icon" aria-hidden="true">✦</div>
+              <div class="jd-ai-copy">
+                <strong>Apply with AI</strong>
+                <span>apply automatically with openAI API</span>
+              </div>
+              <button type="button" class="jd-ai-cta" id="jd-apply-ai">Apply with AI →</button>
+            </div>
+
+            ${
+              applyHref
+                ? `<a class="jd-apply-now" href="${escapeHtml(applyHref)}" target="_blank" rel="noopener noreferrer">Apply now <span aria-hidden="true">↗</span></a>`
+                : `<button type="button" class="jd-apply-now" disabled>Apply now</button>`
+            }
+
+            <div class="jd-action-grid">
+              <div class="jd-action-row">
+                <button type="button" class="jd-action-btn save ${isSaved ? "active" : ""}" data-action="save">${isSaved ? "Saved" : "Save"}</button>
+                <button type="button" class="jd-action-btn applied ${isApplied ? "active" : ""}" data-action="applied">${isApplied ? "Applied" : "Mark Applied"}</button>
+                <button type="button" class="jd-action-btn hide" data-action="hide">Hide Job</button>
+              </div>
+              <div class="jd-action-row">
+                <button type="button" class="jd-action-btn decision eligible ${decision === "eligible" ? "enclicked" : ""}" data-decision="eligible" ${decision === "eligible" ? "disabled" : ""}>Enable</button>
+                <button type="button" class="jd-action-btn decision review ${decision === "needs_review" ? "enclicked" : ""}" data-decision="needs_review" ${decision === "needs_review" ? "disabled" : ""}>Need Review</button>
+                <button type="button" class="jd-action-btn decision reject ${decision === "rejected" ? "enclicked" : ""}" data-decision="rejected" ${decision === "rejected" ? "disabled" : ""}>Reject</button>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div class="jd-panel" data-panel="company">
+          <section class="jd-section">
+            <h3>Company</h3>
+            <p><strong>${escapeHtml(job.company || "Unknown")}</strong></p>
+            ${job.industry ? `<p class="job-meta">${escapeHtml(job.industry)}</p>` : ""}
+            ${job.company_headline ? `<p>${escapeHtml(job.company_headline)}</p>` : ""}
+            ${
+              companyUrl
+                ? `<p><a href="${escapeHtml(companyUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(companyUrl)}</a></p>`
+                : "<p class='muted'>No company website on file.</p>"
+            }
+          </section>
+        </div>
+
+        <div class="jd-panel" data-panel="description">
+          <section class="jd-section">
+            <h3>Job Description</h3>
+            <div class="jd-description">${
+              job.description_text
+                ? escapeHtml(job.description_text).replace(/\n/g, "<br>")
+                : "<span class='muted'>No description stored.</span>"
+            }</div>
+          </section>
+          ${
+            jobUrl || applyUrl
+              ? `<p><a class="job-posting-link" href="${escapeHtml(jobUrl || applyUrl)}" target="_blank" rel="noopener noreferrer">Job Posting</a></p>`
+              : ""
+          }
+        </div>
+      </div>
     </div>
-    ${job.industry ? `<div class="job-meta">${escapeHtml(job.industry)}</div>` : ""}
-    ${job.company_headline ? `<p class="job-headline">${escapeHtml(job.company_headline)}</p>` : ""}
-    <div style="margin:8px 0"><span class="badge ${job.decision || ""}">${escapeHtml(decisionLabel(job.decision))}</span></div>
-    <p>${escapeHtml(job.decision_reason || "")}</p>
-    <div class="detail-actions">
-      ${job.apply_url ? `<a href="${job.apply_url}" target="_blank" rel="noopener">Open Apply URL</a>` : ""}
-      ${job.job_url ? `<a href="${job.job_url}" target="_blank" rel="noopener">Open Source URL</a>` : ""}
-      ${job.company_url ? `<a href="${job.company_url}" target="_blank" rel="noopener">Open Company</a>` : ""}
-      <button type="button" id="mark-review">Need Review</button>
-      <button type="button" id="mark-eligible">Enable</button>
-      <button type="button" id="mark-rejected">Reject</button>
-      <button type="button" id="delete-job" class="danger-btn">Delete</button>
-    </div>
-    <h3>Evidence</h3>
-    ${evidence || "<div class='muted'>No evidence stored.</div>"}
   `;
 
-  document.getElementById("mark-review")?.addEventListener("click", () => updateDecision(job.id, "needs_review"));
-  document.getElementById("mark-eligible")?.addEventListener("click", () => updateDecision(job.id, "eligible"));
-  document.getElementById("mark-rejected")?.addEventListener("click", () => updateDecision(job.id, "rejected"));
-  document.getElementById("delete-job")?.addEventListener("click", () => {
-    selectedJobIds.clear();
-    selectedJobIds.add(job.id);
-    deleteSelectedJobs();
+  document.getElementById("close-job-detail")?.addEventListener("click", closeJobDetailDrawer);
+  document.getElementById("jd-view-all")?.addEventListener("click", () => {
+    openCompanyJobsModal(resolvedStackKey, job.id);
   });
+  document.getElementById("jd-apply-ai")?.addEventListener("click", () => {
+    showCredentialToast("Apply with AI coming soon — OpenAI auto-apply.", "info");
+  });
+
+  jobDetail.querySelectorAll(".jd-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      const name = tab.dataset.tab;
+      jobDetail.querySelectorAll(".jd-tab").forEach((el) => el.classList.toggle("active", el === tab));
+      jobDetail.querySelectorAll(".jd-panel").forEach((panel) => {
+        panel.classList.toggle("active", panel.dataset.panel === name);
+      });
+    });
+  });
+
+  jobDetail.querySelectorAll(".jd-action-grid [data-action]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const action = btn.dataset.action;
+      const current = String(job.status || "new").toLowerCase();
+      try {
+        if (action === "save") {
+          if (current === "applied") return;
+          const next = current === "saved" ? "new" : "saved";
+          const updated = await patchJobFields(job.id, { status: next });
+          job.status = updated.status || next;
+          syncJobInStacks(job.id, { status: job.status });
+        } else if (action === "applied") {
+          const next = current === "applied" ? "saved" : "applied";
+          const updated = await patchJobFields(job.id, { status: next });
+          job.status = updated.status || next;
+          syncJobInStacks(job.id, { status: job.status });
+        } else if (action === "hide") {
+          await patchJobFields(job.id, { status: "hidden" });
+          closeJobDetailDrawer();
+          await loadJobs();
+          return;
+        }
+        await openJobDetailScreen(job.id, resolvedStackKey);
+        await loadJobs();
+      } catch (error) {
+        alert(error.message || "Action failed");
+      }
+    });
+  });
+
+  jobDetail.querySelectorAll(".jd-action-grid [data-decision]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (btn.disabled || btn.classList.contains("enclicked")) return;
+      const nextDecision = btn.dataset.decision;
+      try {
+        await updateDecision(job.id, nextDecision, resolvedStackKey);
+      } catch (error) {
+        alert(error.message || "Failed to update decision");
+      }
+    });
+  });
+
   openJobDetailDrawer();
+}
+
+async function loadJobDetail(jobId) {
+  await openJobDetailScreen(jobId);
 }
 
 async function deleteSelectedJobs() {
@@ -932,13 +1651,10 @@ async function deleteSelectedJobs() {
   await loadJobs();
 }
 
-async function updateDecision(jobId, decision) {
-  await fetch(`/api/jobs/${jobId}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ decision }),
-  });
-  await loadJobDetail(jobId);
+async function updateDecision(jobId, decision, stackKey = null) {
+  const updated = await patchJobFields(jobId, { decision });
+  syncJobInStacks(jobId, { decision: updated.decision || decision });
+  await openJobDetailScreen(jobId, stackKey);
   await loadJobs();
 }
 
@@ -1026,38 +1742,164 @@ function renderPagination(total, page, pageSize) {
 }
 
 async function loadCredentials() {
-  const localPortals = listPortalCredentialStatus();
+  let portals = [];
   let sessionMap = {};
 
-  try {
-    const response = await fetch("/api/credentials/sessions");
-    if (response.ok) {
-      const data = await response.json();
-      sessionMap = Object.fromEntries(data.portals.map((item) => [item.portal, item.has_session]));
+  if (currentUser) {
+    try {
+      const response = await fetch("/api/credentials");
+      if (response.status === 401) {
+        currentUser = null;
+        renderAuthSlot();
+      } else if (response.ok) {
+        const data = await response.json();
+        portals = data.portals || [];
+        // One-time migrate browser-local credentials into the account.
+        await migrateLocalCredentialsToAccount(portals);
+        // Reload after migration so UI shows account state.
+        const refreshed = await fetch("/api/credentials");
+        if (refreshed.ok) {
+          const refreshedData = await refreshed.json();
+          portals = refreshedData.portals || portals;
+        }
+      }
+    } catch {
+      // Fall through to local fallback.
     }
-  } catch {
-    // Optional: only available after dashboard restart on latest version.
   }
 
-  credentialsData = {
-    portals: localPortals.map((item) => ({
+  if (!portals.length) {
+    const localPortals = listPortalCredentialStatus?.() || [];
+    try {
+      const response = await fetch("/api/credentials/sessions");
+      if (response.ok) {
+        const data = await response.json();
+        sessionMap = Object.fromEntries(data.portals.map((item) => [item.portal, item.has_session]));
+      }
+    } catch {
+      // Optional.
+    }
+    portals = localPortals.map((item) => ({
       ...item,
       has_session: sessionMap[item.portal] || false,
-    })),
-    supported_portals: SUPPORTED_PORTALS,
-  };
-
-  if (credentialsData.portals.length === 0) {
-    credentialsData.portals = SUPPORTED_PORTALS.map((portal) => ({
-      portal,
-      configured: false,
-      username: null,
-      has_session: sessionMap[portal] || false,
+      login_url: getPortalCredential?.(item.portal)?.login_url || null,
+      has_password: Boolean(getPortalCredential?.(item.portal)?.password),
+      has_email_app_password: Boolean(getPortalCredential?.(item.portal)?.email_app_password),
     }));
   }
 
+  credentialsData = {
+    portals:
+      portals.length > 0
+        ? portals
+        : SUPPORTED_PORTALS.map((portal) => ({
+            portal,
+            configured: false,
+            username: null,
+            login_url: null,
+            has_password: false,
+            has_email_app_password: false,
+            has_session: false,
+          })),
+    supported_portals: SUPPORTED_PORTALS,
+  };
+
   credentialsContainer.innerHTML = credentialsData.portals.map(renderCredentialCard).join("");
   bindCredentialForms();
+}
+
+async function migrateLocalCredentialsToAccount(accountPortals) {
+  if (!currentUser || !getPortalCredential || !savePortalCredential) return;
+  const configured = new Set(
+    (accountPortals || []).filter((p) => p.configured).map((p) => p.portal)
+  );
+  let migrated = 0;
+  for (const portal of SUPPORTED_PORTALS) {
+    if (configured.has(portal)) continue;
+    const local = getPortalCredential(portal);
+    if (!local?.username) continue;
+    try {
+      const response = await fetch(`/api/credentials/${portal}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: local.username,
+          password: local.password || null,
+          login_url: local.login_url || null,
+          email_app_password: local.email_app_password || null,
+        }),
+      });
+      if (response.ok) migrated += 1;
+    } catch {
+      // Ignore migration failures; user can re-save manually.
+    }
+  }
+  if (migrated > 0) {
+    showCredentialToast(`Moved ${migrated} portal login(s) to your JobSeek account.`);
+  }
+}
+
+async function saveCredentialsToAccount(portal, form) {
+  const data = new FormData(form);
+  const username = String(data.get("username") || "").trim();
+  let password = String(data.get("password") || "");
+  const loginUrl = String(data.get("login_url") || "").trim() || null;
+  const emailAppPassword = String(data.get("email_app_password") || "").trim() || null;
+  const existing = credentialsData.portals.find((p) => p.portal === portal);
+
+  if (!username) {
+    alert("Username is required.");
+    return false;
+  }
+  if (!password) {
+    if (portal === "builtin") {
+      password = null;
+    } else if (!existing?.configured) {
+      alert("Password is required.");
+      return false;
+    } else {
+      password = null; // keep existing on server
+    }
+  }
+
+  const response = await fetch(`/api/credentials/${portal}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      username,
+      password,
+      login_url: loginUrl,
+      email_app_password: emailAppPassword || null,
+    }),
+  });
+  if (response.status === 401) {
+    openAuthModal({
+      reason: "Sign in to save portal credentials on your JobSeek account.",
+      nextAction: "settings",
+    });
+    return false;
+  }
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || "Failed to save credentials");
+  }
+
+  // Optional local cache for offline UI (no longer required for Find Jobs).
+  try {
+    if (password || portal === "builtin") {
+      savePortalCredential?.(portal, {
+        username,
+        password: password || "magic-link-placeholder",
+        loginUrl,
+        emailAppPassword,
+      });
+    }
+  } catch {
+    // Ignore local cache errors.
+  }
+
+  showCredentialToast(`${PORTAL_LABELS[portal] || portal} credentials saved to your account.`);
+  return true;
 }
 
 function saveCredentialsLocally(portal, form) {
@@ -1096,11 +1938,19 @@ function saveCredentialsLocally(portal, form) {
 
 function renderCredentialCard(portalInfo) {
   const label = PORTAL_LABELS[portalInfo.portal] || portalInfo.portal;
-  const saved = getPortalCredential(portalInfo.portal);
+  const storageLabel = currentUser ? "account" : "browser";
   const configured = portalInfo.configured
-    ? `Saved in browser as ${escapeHtml(portalInfo.username || "")}`
-    : "Not saved in browser";
+    ? `Saved on ${storageLabel} as ${escapeHtml(portalInfo.username || "")}`
+    : `Not saved on ${storageLabel}`;
   const session = portalInfo.has_session ? " · Login session saved" : " · No login session";
+  const hasPassword = Boolean(portalInfo.has_password || getPortalCredential?.(portalInfo.portal)?.password);
+  const hasEmailApp = Boolean(
+    portalInfo.has_email_app_password || getPortalCredential?.(portalInfo.portal)?.email_app_password
+  );
+  const loginUrl =
+    portalInfo.login_url || getPortalCredential?.(portalInfo.portal)?.login_url || "";
+  const username =
+    portalInfo.username || getPortalCredential?.(portalInfo.portal)?.username || "";
 
   return `
     <div class="credential-card" data-portal="${portalInfo.portal}">
@@ -1111,21 +1961,27 @@ function renderCredentialCard(portalInfo) {
           name="username"
           placeholder="Email / username"
           autocomplete="username"
-          value="${escapeHtml(saved?.username || "")}"
+          value="${escapeHtml(username)}"
           required
         >
         <input
           type="password"
           name="password"
-          placeholder="${portalInfo.portal === "builtin" ? "Not used for Built In (magic link)" : saved ? "Password saved (enter to change)" : "Password"}"
+          placeholder="${
+            portalInfo.portal === "builtin"
+              ? "Not used for Built In (magic link)"
+              : hasPassword
+                ? "Password saved (enter to change)"
+                : "Password"
+          }"
           autocomplete="current-password"
-          ${portalInfo.portal === "builtin" ? "" : saved ? "" : "required"}
+          ${portalInfo.portal === "builtin" ? "" : hasPassword ? "" : "required"}
         >
         <input
           type="url"
           name="login_url"
           placeholder="Custom login URL (optional, leave empty for Built In)"
-          value="${escapeHtml(saved?.login_url || "")}"
+          value="${escapeHtml(loginUrl)}"
         >
         ${
           portalInfo.portal === "builtin"
@@ -1133,7 +1989,7 @@ function renderCredentialCard(portalInfo) {
         <input
           type="password"
           name="email_app_password"
-          placeholder="${saved?.email_app_password ? "Outlook App Password saved (enter to change)" : "Outlook App Password (for magic-link email)"}"
+          placeholder="${hasEmailApp ? "Outlook App Password saved (enter to change)" : "Outlook App Password (for magic-link email)"}"
           autocomplete="off"
         >
         <p class="portal-hint builtin-hint">
@@ -1143,7 +1999,7 @@ function renderCredentialCard(portalInfo) {
             : ""
         }
         <div class="credential-actions">
-          <button type="submit" class="primary-btn">Save to Browser</button>
+          <button type="submit" class="primary-btn">${currentUser ? "Save to Account" : "Save to Browser"}</button>
           <button type="button" class="secondary-btn delete-cred" ${portalInfo.configured ? "" : "disabled"}>
             Delete Credentials
           </button>
@@ -1158,12 +2014,24 @@ function renderCredentialCard(portalInfo) {
 
 function bindCredentialForms() {
   document.querySelectorAll(".credential-form").forEach((form) => {
-    form.addEventListener("submit", (event) => {
+    form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const portal = form.dataset.portal;
       try {
-        if (saveCredentialsLocally(portal, form)) {
-          loadCredentials();
+        let ok = false;
+        if (currentUser) {
+          ok = await saveCredentialsToAccount(portal, form);
+        } else {
+          ok = saveCredentialsLocally(portal, form);
+          if (ok) {
+            openAuthModal({
+              reason: "Sign in to keep portal credentials on your JobSeek account across devices.",
+              nextAction: "settings",
+            });
+          }
+        }
+        if (ok) {
+          await loadCredentials();
         }
       } catch (error) {
         alert(error.message || "Failed to save credentials");
@@ -1179,11 +2047,13 @@ function bindCredentialForms() {
         return;
       }
       try {
-        deletePortalCredential(portal);
-        const response = await fetch(`/api/credentials/${portal}`, { method: "DELETE" });
-        if (!response.ok && response.status !== 404) {
-          const err = await response.json().catch(() => ({}));
-          throw new Error(err.detail || "Failed to delete server credentials");
+        deletePortalCredential?.(portal);
+        if (currentUser) {
+          const response = await fetch(`/api/credentials/${portal}`, { method: "DELETE" });
+          if (!response.ok && response.status !== 404) {
+            const err = await response.json().catch(() => ({}));
+            throw new Error(err.detail || "Failed to delete account credentials");
+          }
         }
         showCredentialToast(`${label} credentials deleted.`);
         await loadCredentials();
@@ -1202,6 +2072,10 @@ function bindCredentialForms() {
       }
       try {
         const response = await fetch(`/api/credentials/sessions/${portal}`, { method: "DELETE" });
+        if (response.status === 401) {
+          openAuthModal({ reason: "Sign in to manage login sessions." });
+          return;
+        }
         if (!response.ok) {
           const err = await response.json().catch(() => ({}));
           throw new Error(err.detail || "Failed to clear login session");
@@ -1327,18 +2201,28 @@ async function startFindJobs() {
     return;
   }
 
-  const credentials = getCredentialsForPortals(selected);
-  const missing = selected.filter((portal) => !credentials.find((c) => c.portal === portal));
+  const missing = selected.filter((portal) => {
+    const info = credentialsData.portals.find((p) => p.portal === portal);
+    return !info?.configured;
+  });
   if (missing.length) {
     const names = missing.map((p) => PORTAL_LABELS[p] || p).join(", ");
     alert(`Save credentials in Settings for: ${names}`);
     return;
   }
 
+  // When signed in, the server loads credentials from the account.
+  // Keep body credentials only as a fallback for unsigned local-browser saves.
+  const body = { portals: selected, headful: true, guest: false };
+  if (!currentUser) {
+    const credentials = getCredentialsForPortals?.(selected) || [];
+    body.credentials = credentials;
+  }
+
   const response = await fetch("/api/search/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ portals: selected, headful: true, guest: false, credentials }),
+    body: JSON.stringify(body),
   });
 
   if (!response.ok) {

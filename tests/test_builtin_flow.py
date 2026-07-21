@@ -113,6 +113,7 @@ def test_banned_company_rejects_on_card_reason():
 
 
 def test_easy_apply_link_needs_review():
+    """Easy Apply always needs review (does not become eligible)."""
     config = load_rules()
     engine = RuleEngine(config)
     job = NormalizedJob(
@@ -120,12 +121,15 @@ def test_easy_apply_link_needs_review():
         title="Software Engineer Python",
         company="Example Corp",
         location="Remote, US",
+        location_eligible="Yes",
         remote_policy="fully_remote_us",
+        remote_eligible="Yes",
         role_match=True,
         skill_match=True,
         role_excluded=False,
         travel_required=False,
         security_clearance_required=False,
+        onsite_onboarding=False,
         security_related_company_or_role=False,
         salary_text="$120,000",
         salary_min_annual=120000,
@@ -147,12 +151,15 @@ def test_missing_apply_link_needs_review():
         title="Software Engineer Python",
         company="Example Corp",
         location="Remote, US",
+        location_eligible="Yes",
         remote_policy="fully_remote_us",
+        remote_eligible="Yes",
         role_match=True,
         skill_match=True,
         role_excluded=False,
         travel_required=False,
         security_clearance_required=False,
+        onsite_onboarding=False,
         security_related_company_or_role=False,
         salary_text="$120,000",
         salary_min_annual=120000,
@@ -286,6 +293,49 @@ def test_role_match_accepts_sr_and_senior_software_titles():
         assert result.value is True, title
 
 
+def test_is_external_company_website():
+    config = load_rules()
+    worker = BuiltInWorker(config, browser_manager=None, session_manager=None)
+    assert worker._is_external_company_website("https://www.elevenlabs.io/?utm_source=BuiltIn") is True
+    assert worker._is_external_company_website("https://builtin.com/company/elevenlabs") is False
+    assert worker._is_external_company_website("/company/elevenlabs") is False
+
+
+def test_looks_like_requirements_summary():
+    config = load_rules()
+    worker = BuiltInWorker(config, browser_manager=None, session_manager=None)
+    assert worker._looks_like_requirements_summary(
+        "Ship device OS UI with TypeScript and React for a fully remote US team."
+    )
+    assert not worker._looks_like_requirements_summary("Top Skills:")
+    assert not worker._looks_like_requirements_summary("Software • Fintech")
+
+
+def test_fetch_company_website_from_profile_reads_view_website_link():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    config = load_rules()
+    worker = BuiltInWorker(config, browser_manager=None, session_manager=None)
+
+    link = MagicMock()
+    link.count = AsyncMock(return_value=1)
+    link.get_attribute = AsyncMock(
+        return_value="https://www.elevenlabs.io/?utm_source=BuiltIn&utm_medium=BuiltIn&utm_campaign=BuiltIn"
+    )
+
+    page = MagicMock()
+    page.goto = AsyncMock()
+    page.wait_for_timeout = AsyncMock()
+    page.locator = MagicMock(return_value=MagicMock(first=link))
+
+    website = asyncio.run(
+        worker._fetch_company_website_from_profile(page, "https://builtin.com/company/elevenlabs")
+    )
+    assert website and "elevenlabs.io" in website
+    page.goto.assert_awaited()
+
+
 def test_transform_prefers_builtin_detail_header_fields():
     config = load_rules()
     raw = RawJob(
@@ -311,5 +361,7 @@ def test_transform_prefers_builtin_detail_header_fields():
     assert normalized.posted_text == "Posted 9 Hours Ago"
     assert normalized.salary_min_annual == 124000
     assert normalized.salary_max_annual == 209000
-    assert normalized.remote_policy == "hybrid_possible_remote"
+    assert normalized.salary_text == "$124,000 – $209,000"
+    # Defense in company industry → restricted per evidence rules (company industry, not job function).
+    assert normalized.security_related_company_or_role is True
     assert "Aerospace" in (normalized.industry or "")

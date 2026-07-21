@@ -7,6 +7,7 @@ from urllib.parse import quote_plus, urljoin
 
 from playwright.async_api import Locator, Page
 
+from job_automation.etl.posted_parser import parse_posted_relative
 from job_automation.logging_config import get_logger, log_event
 from job_automation.models.domain import Decision, JobDetail, RawJob
 from job_automation.portals.base import BasePortalWorker
@@ -393,9 +394,11 @@ class BuiltInWorker(BasePortalWorker):
             r"\d{2,3}K(?:\s*-\s*\d{2,3}K)?(?:\s*Annually)?)",
         )
         work_type = await self._card_work_type(card)
+        card_posted_text = await self._card_posted_text(card)
+        card_posted = parse_posted_relative(card_posted_text)
 
-        industry = await self._expand_and_read_industry(card)
-        top_skills = await self._card_top_skills(card)
+        # List-card meta (before detail): industry, requirements summary, top skills.
+        industry, requirements_summary, top_skills = await self._expand_and_read_card_meta(card)
         ban_reason = self._card_reject_reason(company, industry)
         if ban_reason:
             await self._click_heart(card)
@@ -405,13 +408,18 @@ class BuiltInWorker(BasePortalWorker):
                 job_card_title=title,
                 job_card_company=company,
                 company_url=company_url,
+                company_headline=requirements_summary,
                 job_card_location=location,
                 job_card_salary=salary,
                 job_card_url=detail_url,
                 portal_job_url=detail_url,
                 industry=industry,
                 work_type=work_type,
+                posted_text=card_posted.raw_text or card_posted_text,
+                posted_at=card_posted.posted_at,
+                is_reposted=card_posted.is_reposted,
                 top_skills=top_skills,
+                match_background_text=requirements_summary,
                 description_text=f"Query: {query}\nIndustry: {industry or ''}\n{ban_reason}",
                 forced_decision=Decision.REJECTED,
                 forced_decision_reason=ban_reason,
@@ -428,35 +436,49 @@ class BuiltInWorker(BasePortalWorker):
                 job_card_title=title,
                 job_card_company=company,
                 company_url=company_url,
+                company_headline=requirements_summary,
                 job_card_location=location,
                 job_card_salary=salary,
                 job_card_url=detail_url,
                 portal_job_url=detail_url,
                 industry=industry,
                 work_type=work_type,
+                posted_text=card_posted.raw_text or card_posted_text,
+                posted_at=card_posted.posted_at,
+                is_reposted=card_posted.is_reposted,
                 top_skills=top_skills,
+                match_background_text=requirements_summary,
             ),
         )
 
+        detail_posted = parse_posted_relative(detail.posted_text)
+        posted_text = detail.posted_text or card_posted.raw_text or card_posted_text
+        posted_at = detail_posted.posted_at or detail.posted_at or card_posted.posted_at
+        is_reposted = bool(detail_posted.is_reposted or detail.is_reposted or card_posted.is_reposted)
+
+        # Prefer list-card industry / requirements / top skills over detail-page values.
+        list_skills = top_skills or []
         return RawJob(
             source_portal=self.portal_name,
             source_job_id=detail.source_job_id,
             job_card_title=detail.title or title,
             job_card_company=detail.company or company,
-            company_url=company_url or detail.company_url,
-            company_headline=detail.company_headline,
+            company_url=detail.company_url or company_url,
+            company_headline=requirements_summary or detail.company_headline,
             job_card_location=detail.location or location,
             job_card_salary=detail.salary_text or salary,
             job_card_url=detail_url,
             portal_job_url=detail.portal_job_url or detail_url,
             apply_url=detail.apply_url,
-            industry=detail.industry or industry,
+            industry=industry or detail.industry,
             work_type=detail.work_type or work_type,
             experience_level=detail.experience_level,
-            posted_text=detail.posted_text,
-            top_skills=detail.skills_required or top_skills,
-            skills_required=detail.skills_required or top_skills,
-            match_background_text=detail.match_background_text,
+            posted_text=posted_text,
+            posted_at=posted_at,
+            is_reposted=is_reposted,
+            top_skills=list_skills,
+            skills_required=list_skills or detail.skills_required,
+            match_background_text=requirements_summary or detail.match_background_text,
             raw_html=detail.raw_html,
             description_text=detail.description_text,
         )
@@ -489,8 +511,10 @@ class BuiltInWorker(BasePortalWorker):
                     return f"Banned industry: {industry}"
         return None
 
-    async def _expand_and_read_industry(self, card: Locator) -> str | None:
-        # Only use this card's dropdown — never fall back to another card on the page.
+    async def _expand_and_read_card_meta(
+        self, card: Locator
+    ) -> tuple[str | None, str | None, list[str]]:
+        """Expand list-card dropdown and read industry, requirements summary, top skills."""
         dropdown = card.locator("#job-dropdown-button, button#job-dropdown-button").first
         try:
             if await dropdown.count():
@@ -506,39 +530,131 @@ class BuiltInWorker(BasePortalWorker):
                 level=30,
             )
 
+        industry = await self._card_industry(card)
+        requirements = await self._card_requirements_summary(card)
+        top_skills = await self._card_top_skills(card)
+        return industry, requirements, top_skills
+
+    async def _expand_and_read_industry(self, card: Locator) -> str | None:
+        """Compatibility wrapper — prefer _expand_and_read_card_meta."""
+        industry, _, _ = await self._expand_and_read_card_meta(card)
+        return industry
+
+    async def _card_industry(self, card: Locator) -> str | None:
         # Industry is inside the expanded card; do not read from other cards.
-        industry_node = card.locator("div.mb-md.fs-xs.fw-bold").first
+        industry_node = card.locator(
+            "div.mb-md.fs-xs.fw-bold, "
+            "div.fs-xs.fw-bold.mb-md, "
+            ".industry, "
+            "[data-id='industry']"
+        ).first
         if await industry_node.count() == 0:
             return None
         text = normalize_whitespace(await industry_node.inner_text())
-        # Ignore accidental matches like "Top Skills" headers.
         if not text or text.lower().startswith("top skill"):
             return None
         return text
 
+    async def _card_requirements_summary(self, card: Locator) -> str | None:
+        """Requirements / company summary text on the Built In list card (after expand)."""
+        # Prefer the text block immediately after the industry line.
+        industry_node = card.locator("div.mb-md.fs-xs.fw-bold, div.fs-xs.fw-bold.mb-md").first
+        if await industry_node.count():
+            sibling = industry_node.locator("xpath=following-sibling::*[1]")
+            if await sibling.count():
+                text = normalize_whitespace(await sibling.inner_text())
+                if self._looks_like_requirements_summary(text):
+                    return text
+
+        # Fallback selectors used on Built In expanded cards.
+        candidates = card.locator(
+            "div.fs-sm.fw-regular, "
+            "div.fs-sm.text-gray-03, "
+            "div.fs-xs.fw-regular:not(:has-text('Top Skills')), "
+            "p.fs-sm, "
+            "[data-id='job-summary'], "
+            "[data-id='company-description']"
+        )
+        count = await candidates.count()
+        for i in range(min(count, 8)):
+            text = normalize_whitespace(await candidates.nth(i).inner_text())
+            if self._looks_like_requirements_summary(text):
+                return text
+        return None
+
+    @staticmethod
+    def _looks_like_requirements_summary(text: str | None) -> bool:
+        if not text:
+            return False
+        lowered = text.lower().strip()
+        if len(lowered) < 24:
+            return False
+        if lowered.startswith("top skill"):
+            return False
+        if lowered in {"industry", "company", "skills required"}:
+            return False
+        # Industry tags are usually short bullet lists without sentences.
+        if "•" in text and "." not in text and len(text) < 80:
+            return False
+        return True
+
     async def _card_top_skills(self, card: Locator) -> list[str]:
-        """Read Built In card 'Top Skills:' chips from the list page."""
+        """Read Built In card 'Top Skills:' chips/text from the list page."""
         skills: list[str] = []
-        block = card.locator("div:has(span:text-is('Top Skills:')), div:has-text('Top Skills:')").first
+        block = card.locator(
+            "div:has(span:text-is('Top Skills:')), "
+            "div:has(span:text-is('TOP SKILLS:')), "
+            "div:has-text('Top Skills:'), "
+            "div.border.rounded-2:has-text('Top Skills')"
+        ).first
         if await block.count() == 0:
             block = card
-        # Prefer the sibling chip container next to the Top Skills label.
+
+        # Prefer chip spans next to the Top Skills label.
         chips = block.locator(
-            "xpath=.//span[normalize-space()='Top Skills:']/following-sibling::span[1]//span"
+            "xpath=.//span[contains(translate(normalize-space(), "
+            "'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'top skills')]"
+            "/following-sibling::span[1]//span"
         )
         count = await chips.count()
         if count == 0:
-            chips = block.locator("span.fs-xs.text-gray-04.mx-sm, span.d-md-inline span")
+            chips = block.locator(
+                "span.fs-xs.text-gray-04.mx-sm, "
+                "span.d-md-inline span.fs-xs, "
+                "span.fs-xs.text-gray-04"
+            )
             count = await chips.count()
+
         for i in range(count):
             text = normalize_whitespace(await chips.nth(i).inner_text())
             if not text:
                 continue
             lowered = text.lower()
-            if lowered in {"top skills:", "top skills"}:
+            if lowered in {"top skills:", "top skills", "top skills"}:
+                continue
+            if "," in text and len(text) > 40:
+                for part in re.split(r"\s*,\s*", text):
+                    token = normalize_whitespace(part)
+                    if token and token.lower() not in {"top skills:", "top skills"} and token not in skills:
+                        skills.append(token)
                 continue
             if text not in skills:
                 skills.append(text)
+
+        # Fallback: one text node "Top Skills: React, Python, ..."
+        if not skills:
+            label = block.locator(
+                "xpath=.//*[contains(translate(normalize-space(), "
+                "'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'top skills')]"
+            ).first
+            if await label.count():
+                raw = normalize_whitespace(await label.inner_text()) or ""
+                payload = re.sub(r"(?i)^top\s*skills:\s*", "", raw).strip()
+                if payload and payload.lower() != "top skills":
+                    for part in re.split(r"\s*,\s*", payload):
+                        token = normalize_whitespace(part)
+                        if token and token not in skills:
+                            skills.append(token)
         return skills
 
     async def _click_heart(self, card: Locator) -> None:
@@ -639,8 +755,14 @@ class BuiltInWorker(BasePortalWorker):
             "a[href*='/company/'] h2, h2.text-pretty-blue, "
             "a[href*='/company/'].text-pretty-blue, .company-title, [data-id='company-title']",
         )
-        company_url = await self._detail_company_url(page) or raw_job.company_url
+        company_profile_url = await self._detail_company_profile_url(page) or raw_job.company_url
+        company_url = await self._fetch_company_website_from_profile(page, company_profile_url)
         posted_text = await self._detail_posted_text(page)
+        posted = parse_posted_relative(posted_text)
+        if posted.posted_at is None and raw_job.posted_at:
+            posted.posted_at = raw_job.posted_at
+        if raw_job.is_reposted:
+            posted.is_reposted = True
         location = await self._detail_icon_row_text(page, "fa-location-dot")
         if not location:
             location = await safe_inner_text(page, ".job-location, .location, [data-id='job-location']")
@@ -671,7 +793,9 @@ class BuiltInWorker(BasePortalWorker):
             industry=industry or raw_job.industry,
             work_type=work_type or raw_job.work_type,
             experience_level=experience_level or raw_job.experience_level,
-            posted_text=posted_text or raw_job.posted_text,
+            posted_text=posted.raw_text or posted_text or raw_job.posted_text,
+            posted_at=posted.posted_at or raw_job.posted_at,
+            is_reposted=bool(posted.is_reposted or raw_job.is_reposted),
             skills_required=skills_required,
             match_background_text=match_background,
             portal_job_url=page.url or raw_job.portal_job_url,
@@ -722,8 +846,14 @@ class BuiltInWorker(BasePortalWorker):
                     skills.append(token)
         return skills, full_text
 
-    async def _detail_company_url(self, page: Page) -> str | None:
-        link = page.locator("a[href*='/company/']").first
+    async def _detail_company_profile_url(self, page: Page) -> str | None:
+        """Built In job detail links to /company/slug — not the external website."""
+        link = page.locator(
+            "a[href*='/company/'].text-pretty-blue, "
+            "a.hover-underline[href*='/company/'], "
+            "a[href*='/company/']:has(h2), "
+            "a[href*='/company/']"
+        ).first
         if await link.count() == 0:
             return None
         href = await link.get_attribute("href")
@@ -733,10 +863,84 @@ class BuiltInWorker(BasePortalWorker):
             return href
         return urljoin(BUILTIN_ORIGIN, href)
 
+    async def _fetch_company_website_from_profile(self, page: Page, profile_url: str | None) -> str | None:
+        """Open Built In company page and read the external View Website href."""
+        if not profile_url:
+            return None
+        url = profile_url if profile_url.startswith("http") else urljoin(BUILTIN_ORIGIN, profile_url)
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(800)
+            link = page.locator(
+                "a.hover-underline:has-text('View Website'), "
+                "a.font-barlow:has-text('View Website'), "
+                "a:has-text('View Website')"
+            ).first
+            if await link.count() == 0:
+                log_event(
+                    logger,
+                    f"No View Website link on company page: {url}",
+                    portal=self.portal_name,
+                    action="company_website",
+                    level=30,
+                )
+                return None
+            href = await link.get_attribute("href")
+            if not href or not self._is_external_company_website(href):
+                return None
+            if href.startswith("http"):
+                website = href
+            else:
+                website = urljoin(BUILTIN_ORIGIN, href)
+            if not self._is_external_company_website(website):
+                return None
+            log_event(
+                logger,
+                f"Resolved company website: {website}",
+                portal=self.portal_name,
+                action="company_website",
+            )
+            return website
+        except Exception as exc:
+            log_event(
+                logger,
+                f"Company website lookup failed for {url}: {exc}",
+                portal=self.portal_name,
+                action="company_website",
+                level=30,
+            )
+            return None
+
+    @staticmethod
+    def _is_external_company_website(href: str) -> bool:
+        lowered = href.lower().strip()
+        if not lowered.startswith("http"):
+            return False
+        if "builtin.com" in lowered:
+            return False
+        return True
+
+    async def _card_posted_text(self, card: Locator) -> str | None:
+        """Pull Posted/Reposted relative time from Built In list card text."""
+        text = normalize_whitespace(await card.inner_text()) or ""
+        match = re.search(
+            r"((?:Reposted|Posted)\s+)?(?:\d+\s*(?:minutes?|mins?|hours?|hrs?|days?|weeks?)\s*ago|yesterday|today|just\s*now)",
+            text,
+            re.I,
+        )
+        if match:
+            return normalize_whitespace(match.group(0))
+        # Fallback: first token before a middle-dot separator (e.g. "3 Hours Ago · Remote").
+        first = text.split("·")[0].strip()
+        if re.search(r"\bago\b|yesterday|today", first, re.I):
+            return first
+        return None
+
     async def _detail_posted_text(self, page: Page) -> str | None:
         posted = await safe_inner_text(
             page,
-            "i.fa-clock ~ span.font-barlow, span.font-barlow:text-matches('Posted', 'i')",
+            "i.fa-clock ~ span.font-barlow, "
+            "span.font-barlow:text-matches('Posted|Reposted', 'i')",
         )
         if posted:
             return posted

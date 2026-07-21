@@ -18,7 +18,9 @@ from tests.fixtures.builtin_board import BUILTIN_LIST_HTML
 DETAIL_FRONTEND = """
 <!DOCTYPE html><html><body>
   <h1>Frontend Engineer, Device OS</h1>
-  <a href="/company/apkudo">Apkudo</a>
+  <a href="/company/apkudo" target="_blank" class="hover-underline text-pretty-blue font-barlow fw-medium fs-2xl">
+    <h2 class="text-pretty-blue m-0">Apkudo</h2>
+  </a>
   <div class="job-location">United States</div>
   <div class="job-salary">$100,000 - $130,000 Annually</div>
   <div data-id="job-remote">Fully Remote</div>
@@ -28,6 +30,16 @@ DETAIL_FRONTEND = """
     Python friendly frontend role.
   </div>
   <a id="applyButton" href="https://boards.greenhouse.io/apkudo/jobs/123">Apply</a>
+</body></html>
+"""
+
+COMPANY_APKUDO = """
+<!DOCTYPE html><html><body>
+  <div class="d-flex align-items-center w-md-50">
+    <i class="fa fa-sm fa-regular fa-arrow-up-right-from-square text-primary"></i>
+    <a href="https://www.apkudo.com/?utm_source=BuiltIn&utm_medium=BuiltIn&utm_campaign=BuiltIn"
+       target="_blank" rel="noopener nofollow" class="font-barlow ms-sm hover-underline">View Website</a>
+  </div>
 </body></html>
 """
 
@@ -65,7 +77,9 @@ class _FakeSessionManager:
 async def _install_builtin_routes(page) -> None:
     async def handler(route: Route) -> None:
         url = route.request.url
-        if "/job/frontend-os-2" in url:
+        if "/company/apkudo" in url:
+            await route.fulfill(status=200, content_type="text/html", body=COMPANY_APKUDO)
+        elif "/job/frontend-os-2" in url:
             await route.fulfill(status=200, content_type="text/html", body=DETAIL_FRONTEND)
         elif "/job/python-easy" in url:
             await route.fulfill(status=200, content_type="text/html", body=DETAIL_EASY_APPLY)
@@ -125,6 +139,11 @@ async def test_e2e_builtin_login_search_filters_and_job_pipeline():
         assert good.forced_decision is None
         assert "Frontend Engineer" in (good.job_card_title or "")
         assert good.apply_url and "greenhouse.io" in good.apply_url
+        assert good.company_url and "apkudo.com" in good.company_url
+        assert "builtin.com/company/" not in (good.company_url or "")
+        assert good.industry == "Software"
+        assert good.top_skills and "TypeScript" in good.top_skills
+        assert good.match_background_text and "device OS" in good.match_background_text
         assert good.description_text and "Fully remote" in good.description_text
         assert "builtin.com/jobs" in page.url or await page.locator(".job-card").count() > 0
 
@@ -181,16 +200,19 @@ async def test_e2e_easy_apply_link_needs_review_after_etl():
     )
     normalized = transform_raw_job(raw, config)
     normalized.remote_policy = "fully_remote_us"
+    normalized.location_eligible = "Yes"
+    normalized.remote_eligible = "Yes"
     normalized.role_match = True
     normalized.skill_match = True
     normalized.role_excluded = False
     normalized.travel_required = False
     normalized.security_clearance_required = False
+    normalized.onsite_onboarding = False
     normalized.security_related_company_or_role = False
     normalized.commitment = "Full Time"
     normalized.experience_level = "Mid Level"
     normalized.salary_min_annual = 140000
-    normalized.salary_text = "$140,000 Annually"
+    normalized.salary_text = "$140,000"
     decided = RuleEngine(config).decide(normalized)
     assert decided.decision == Decision.NEEDS_REVIEW
     assert decided.decision_reason == "easy apply"

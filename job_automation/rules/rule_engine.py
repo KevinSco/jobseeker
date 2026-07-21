@@ -1,14 +1,16 @@
-"""Strict deterministic rule engine."""
+"""Strict deterministic rule engine (evidence rules from rule.txt)."""
 
 from __future__ import annotations
 
 from job_automation.config.loader import SearchConfig
+from job_automation.dedupe.deduplicate import DeduplicationEngine
 from job_automation.models.domain import Decision, Evidence, NormalizedJob
 
 
 class RuleEngine:
-    def __init__(self, config: SearchConfig):
+    def __init__(self, config: SearchConfig, dedupe_engine: DeduplicationEngine | None = None):
         self.config = config
+        self.dedupe_engine = dedupe_engine
 
     def decide(self, job: NormalizedJob) -> NormalizedJob:
         if job.is_duplicate or job.decision == Decision.DUPLICATE:
@@ -31,16 +33,48 @@ class RuleEngine:
         if review_reason:
             job.decision = Decision.NEEDS_REVIEW
             job.decision_reason = review_reason
+            if self.is_easy_apply(job.apply_url):
+                job.evidence.append(
+                    Evidence(
+                        field="easy_apply",
+                        value=True,
+                        evidence_text=job.apply_url or "Easy Apply",
+                        source="apply_url",
+                    )
+                )
             job.evidence.append(
                 Evidence(field="decision", value="needs_review", evidence_text=review_reason)
             )
             return job
 
         if self._is_eligible(job):
+            # Same company+title at a different location: good fit still needs human review.
+            if self.dedupe_engine and self.dedupe_engine.has_same_role_different_location(job):
+                job.decision = Decision.NEEDS_REVIEW
+                job.decision_reason = (
+                    "Same company and title already seen at a different location — needs review"
+                )
+                job.evidence.append(
+                    Evidence(
+                        field="multi_location_role",
+                        value=True,
+                        evidence_text=job.decision_reason,
+                        source="dedupe",
+                    )
+                )
+                job.evidence.append(
+                    Evidence(
+                        field="decision",
+                        value="needs_review",
+                        evidence_text=job.decision_reason,
+                    )
+                )
+                return job
+
             job.decision = Decision.ELIGIBLE
             job.decision_reason = (
-                "Fully remote US role, no travel, no clearance, salary meets minimum, "
-                "and role/skills match."
+                "CT-eligible remote role, no travel, no clearance, no on-site onboarding, "
+                "salary meets minimum, and role/skills match."
             )
             job.evidence.append(
                 Evidence(field="decision", value="eligible", evidence_text=job.decision_reason)
@@ -60,14 +94,26 @@ class RuleEngine:
             return f"Banned industry: {banned_hit}"
         if job.role_excluded:
             return "Role is excluded"
+        if job.location_eligible == "No":
+            return "Location not eligible for Connecticut"
+        if job.remote_eligible == "No":
+            return "Remote not available for Connecticut applicant"
         if job.security_clearance_required is True:
-            return "Security clearance required"
+            return "Security clearance or fingerprint required"
         if job.travel_required is True:
             return "Travel required"
-        if job.remote_policy in {"onsite_required", "hybrid_required"}:
+        if job.onsite_onboarding is True:
+            return "On-site onboarding required"
+        # Legacy remote_policy codes when Yes/No fields absent (older rows).
+        if job.remote_eligible is None and job.remote_policy in {
+            "onsite_required",
+            "hybrid_required",
+        }:
             return f"Remote policy rejected: {job.remote_policy}"
         if job.industry == "government":
             return "Government industry"
+        if job.security_related_company_or_role:
+            return "Company industry is security/defense/federal/government"
         if job.role_match is False:
             return "Role does not match target roles"
         if job.skill_match is False:
@@ -90,16 +136,26 @@ class RuleEngine:
             return "Skills partially match target skills"
         if not job.description_text:
             return "Job description missing"
-        if job.salary_text is None and job.salary_min_annual is None and job.salary_min_hourly is None:
+        if (
+            job.salary_text is None
+            or job.salary_text == "Not listed"
+        ) and job.salary_min_annual is None and job.salary_min_hourly is None:
             return "Salary missing"
-        if job.remote_policy in {"remote_unclear", "remote_specific_states", "hybrid_possible_remote"}:
+        if job.location_eligible == "Unknown":
+            return "Location eligibility unclear for Connecticut"
+        if job.remote_eligible == "Unknown":
+            return "Remote policy unclear"
+        if job.remote_eligible is None and job.remote_policy in {
+            "remote_unclear",
+            "remote_specific_states",
+            "hybrid_possible_remote",
+            "unclear",
+        }:
             return f"Remote policy needs review: {job.remote_policy}"
         if job.travel_required is None:
             return "Travel requirement unclear"
         if job.security_clearance_required is None:
             return "Security clearance requirement unclear"
-        if job.security_related_company_or_role:
-            return "Security/cybersecurity related company or role"
         if job.commitment is None:
             return "Commitment unclear"
         if job.experience_level is None:
@@ -109,11 +165,15 @@ class RuleEngine:
     def _apply_link_review_reason(self, apply_url: str | None) -> str | None:
         if not apply_url or not str(apply_url).strip():
             return "apply link error"
-        normalized = str(apply_url).strip().lower()
-        # Built In Easy Apply paths look like /apply/job/<id>
-        if "/apply/job/" in normalized:
+        if self.is_easy_apply(apply_url):
             return "easy apply"
         return None
+
+    @staticmethod
+    def is_easy_apply(apply_url: str | None) -> bool:
+        if not apply_url:
+            return False
+        return "/apply/job/" in str(apply_url).strip().lower()
 
     def _banned_industry_hit(self, industry: str | None) -> str | None:
         if not industry:
@@ -126,19 +186,29 @@ class RuleEngine:
         return None
 
     def _is_eligible(self, job: NormalizedJob) -> bool:
+        remote_ok = job.remote_eligible == "Yes" or (
+            job.remote_eligible is None and job.remote_policy == "fully_remote_us"
+        )
+        location_ok = job.location_eligible == "Yes" or (
+            job.location_eligible is None and job.remote_policy == "fully_remote_us"
+        )
         return all(
             [
                 job.role_match is True,
                 not job.role_excluded,
                 job.skill_match is True,
-                job.remote_policy == "fully_remote_us",
+                location_ok,
+                remote_ok,
                 job.travel_required is False,
                 job.security_clearance_required is False,
+                job.onsite_onboarding is not True,
                 job.industry != "government",
                 not job.security_related_company_or_role,
-                job.salary_text is not None
-                or job.salary_min_annual is not None
-                or job.salary_min_hourly is not None,
+                (
+                    (job.salary_text is not None and job.salary_text != "Not listed")
+                    or job.salary_min_annual is not None
+                    or job.salary_min_hourly is not None
+                ),
                 self._salary_meets_minimum(job),
                 job.commitment in self.config.commitment_types,
                 job.experience_level in self.config.experience_levels,

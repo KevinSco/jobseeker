@@ -29,6 +29,11 @@ COLUMN_MIGRATIONS = [
     ("jobs", "company_headline", "ALTER TABLE jobs ADD COLUMN company_headline TEXT"),
     ("jobs", "work_type", "ALTER TABLE jobs ADD COLUMN work_type VARCHAR(128)"),
     ("jobs", "posted_text", "ALTER TABLE jobs ADD COLUMN posted_text VARCHAR(128)"),
+    ("jobs", "posted_at", "ALTER TABLE jobs ADD COLUMN posted_at DATETIME"),
+    ("jobs", "is_reposted", "ALTER TABLE jobs ADD COLUMN is_reposted BOOLEAN DEFAULT 0"),
+    ("jobs", "location_eligible", "ALTER TABLE jobs ADD COLUMN location_eligible VARCHAR(32)"),
+    ("jobs", "remote_eligible", "ALTER TABLE jobs ADD COLUMN remote_eligible VARCHAR(32)"),
+    ("jobs", "onsite_onboarding", "ALTER TABLE jobs ADD COLUMN onsite_onboarding BOOLEAN"),
 ]
 
 
