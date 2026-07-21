@@ -7,6 +7,7 @@ from urllib.parse import quote_plus, urljoin
 
 from playwright.async_api import Locator, Page
 
+from job_automation.etl.cleaner import normalize_job_location
 from job_automation.etl.posted_parser import parse_posted_relative
 from job_automation.logging_config import get_logger, log_event
 from job_automation.models.domain import Decision, JobDetail, RawJob
@@ -170,12 +171,116 @@ class BuiltInWorker(BasePortalWorker):
         return await self._extract_detail(page, raw_job)
 
     async def extract_apply_url(self, page: Page) -> str | None:
-        href = await page.locator("a#applyButton").first.get_attribute("href")
+        apply_url, _is_easy = await self._resolve_apply(page)
+        return apply_url
+
+    async def _resolve_apply(self, page: Page) -> tuple[str | None, bool]:
+        """Return (external_apply_url, is_easy_apply).
+
+        Easy Apply uses Built In's internal /apply/job/ flow — do not save that link.
+        Detect via sticky-bar buttons (class contains job-post-sticky-bar-btn) or badges
+        without waiting on a missing #applyButton (that hang was several seconds).
+        """
+        # 1) Sticky footer: apply vs save — Easy Apply text means internal apply.
+        sticky = page.locator("[class*='job-post-sticky-bar-btn']")
+        sticky_count = await sticky.count()
+        for i in range(sticky_count):
+            btn = sticky.nth(i)
+            text = (normalize_whitespace(await btn.inner_text()) or "").lower()
+            if "save" in text and "apply" not in text:
+                continue
+            if "easy apply" in text or "easyapply" in text.replace(" ", ""):
+                log_event(
+                    logger,
+                    "Easy Apply detected on sticky bar — skipping internal apply link",
+                    portal=self.portal_name,
+                    action="easy_apply",
+                )
+                return None, True
+            if "apply" in text:
+                href = await self._href_from_apply_control(btn)
+                if href and self._is_builtin_easy_apply_url(href):
+                    return None, True
+                if href and self._is_external_apply_url(href):
+                    return href, False
+
+        # 2) Header / body Easy Apply badge (lightning + "Easy Apply").
+        badge = page.locator(
+            "text=/^\\s*Easy Apply\\s*$/i, "
+            "[class*='easy-apply'], "
+            "[class*='EasyApply'], "
+            "span:has-text('Easy Apply'), "
+            "div:has-text('Easy Apply')"
+        )
+        # Prefer a tight match: short badge text, not the whole page.
+        badge_count = min(await badge.count(), 12)
+        for i in range(badge_count):
+            text = (normalize_whitespace(await badge.nth(i).inner_text()) or "").lower()
+            if text == "easy apply" or text.startswith("easy apply"):
+                if len(text) <= 24:
+                    log_event(
+                        logger,
+                        "Easy Apply badge detected — skipping internal apply link",
+                        portal=self.portal_name,
+                        action="easy_apply",
+                    )
+                    return None, True
+
+        # 3) Classic apply anchor (external ATS). Use count() so missing nodes don't wait.
+        for selector in (
+            "a#applyButton",
+            "a[id*='apply' i]",
+            "a[href*='greenhouse.io']",
+            "a[href*='lever.co']",
+            "a[href*='ashbyhq.com']",
+            "a[href*='workday']",
+            "a[href*='jobs.']",
+            "a[href*='careers.']",
+        ):
+            links = page.locator(selector)
+            if await links.count() == 0:
+                continue
+            href = await links.first.get_attribute("href")
+            if not href:
+                continue
+            absolute = href if href.startswith("http") else urljoin(BUILTIN_ORIGIN, href)
+            if self._is_builtin_easy_apply_url(absolute):
+                return None, True
+            if self._is_external_apply_url(absolute):
+                return absolute, False
+
+        return None, False
+
+    @staticmethod
+    def _is_builtin_easy_apply_url(href: str) -> bool:
+        lowered = href.lower().strip()
+        return "builtin.com" in lowered and "/apply/" in lowered
+
+    @staticmethod
+    def _is_external_apply_url(href: str) -> bool:
+        lowered = href.lower().strip()
+        if not lowered.startswith("http"):
+            return False
+        if "builtin.com" in lowered:
+            return False
+        return True
+
+    async def _href_from_apply_control(self, control: Locator) -> str | None:
+        href = await control.get_attribute("href")
+        if href:
+            return href if href.startswith("http") else urljoin(BUILTIN_ORIGIN, href)
+        link = control.locator("a[href]").first
+        if await link.count() == 0:
+            # Control may itself be nested inside an <a>.
+            parent_link = control.locator("xpath=ancestor::a[@href][1]").first
+            if await parent_link.count() == 0:
+                return None
+            href = await parent_link.get_attribute("href")
+        else:
+            href = await link.get_attribute("href")
         if not href:
             return None
-        if href.startswith("http"):
-            return href
-        return urljoin(BUILTIN_ORIGIN, href)
+        return href if href.startswith("http") else urljoin(BUILTIN_ORIGIN, href)
 
     async def extract_description(self, page: Page) -> str | None:
         # Built In job body is always in a div whose id starts with "job-post-body-".
@@ -380,13 +485,13 @@ class BuiltInWorker(BasePortalWorker):
 
     async def _process_card(self, page: Page, card: Locator, query: str) -> RawJob | None:
         company = await self._card_company(card)
-        company_url = await self._card_company_url(card)
+        company_profile_url = await self._card_company_url(card)
         title = await self._card_title(card)
         detail_href = await self._card_job_href(card)
         if not detail_href:
             return None
         detail_url = detail_href if detail_href.startswith("http") else urljoin(BUILTIN_ORIGIN, detail_href)
-        location = await self._card_text_match(card, r"(United States|USA|Remote|[A-Za-z ]+, [A-Z]{2})")
+        location = await self._card_location(card)
         # Prefer explicit salary shapes ($120K, 124K-209K Annually); avoid lone digits.
         salary = await self._card_text_match(
             card,
@@ -397,7 +502,7 @@ class BuiltInWorker(BasePortalWorker):
         card_posted_text = await self._card_posted_text(card)
         card_posted = parse_posted_relative(card_posted_text)
 
-        # List-card meta (before detail): industry, requirements summary, top skills.
+        # Expand job-card dropdown for industry / requirements / top skills (ban check).
         industry, requirements_summary, top_skills = await self._expand_and_read_card_meta(card)
         ban_reason = self._card_reject_reason(company, industry)
         if ban_reason:
@@ -407,8 +512,8 @@ class BuiltInWorker(BasePortalWorker):
                 source_job_id=extract_job_id_from_url(detail_url),
                 job_card_title=title,
                 job_card_company=company,
-                company_url=company_url,
-                company_headline=requirements_summary,
+                company_url=company_profile_url,
+                company_headline=None,
                 job_card_location=location,
                 job_card_salary=salary,
                 job_card_url=detail_url,
@@ -425,7 +530,11 @@ class BuiltInWorker(BasePortalWorker):
                 forced_decision_reason=ban_reason,
             )
 
-        # Good card: heart on list, open detail in a NEW TAB so the list page stays intact.
+        # Good card: company profile → View Website (side tab), stay on list, then open detail.
+        company_url = await self._fetch_company_website_from_profile(page, company_profile_url)
+        if not company_url:
+            company_url = company_profile_url
+
         await self._click_heart(card)
         detail = await self._extract_detail_in_new_tab(
             page,
@@ -436,7 +545,7 @@ class BuiltInWorker(BasePortalWorker):
                 job_card_title=title,
                 job_card_company=company,
                 company_url=company_url,
-                company_headline=requirements_summary,
+                company_headline=None,
                 job_card_location=location,
                 job_card_salary=salary,
                 job_card_url=detail_url,
@@ -464,12 +573,14 @@ class BuiltInWorker(BasePortalWorker):
             job_card_title=detail.title or title,
             job_card_company=detail.company or company,
             company_url=detail.company_url or company_url,
-            company_headline=requirements_summary or detail.company_headline,
+            # company_headline = company mission; requirements stay in match_background_text.
+            company_headline=detail.company_headline,
             job_card_location=detail.location or location,
             job_card_salary=detail.salary_text or salary,
             job_card_url=detail_url,
             portal_job_url=detail.portal_job_url or detail_url,
             apply_url=detail.apply_url,
+            is_easy_apply=bool(detail.is_easy_apply),
             industry=industry or detail.industry,
             work_type=detail.work_type or work_type,
             experience_level=detail.experience_level,
@@ -478,7 +589,8 @@ class BuiltInWorker(BasePortalWorker):
             is_reposted=is_reposted,
             top_skills=list_skills,
             skills_required=list_skills or detail.skills_required,
-            match_background_text=requirements_summary or detail.match_background_text,
+            # Requirements summary must only ever come from the list-card dropdown, never the detail page.
+            match_background_text=requirements_summary,
             raw_html=detail.raw_html,
             description_text=detail.description_text,
         )
@@ -541,8 +653,10 @@ class BuiltInWorker(BasePortalWorker):
         return industry
 
     async def _card_industry(self, card: Locator) -> str | None:
-        # Industry is inside the expanded card; do not read from other cards.
+        # Industry is inside the expanded drop-data panel; do not read from other cards.
         industry_node = card.locator(
+            "[id^='drop-data-'] div.mb-md.fs-xs.fw-bold, "
+            "div.collapse.show div.mb-md.fs-xs.fw-bold, "
             "div.mb-md.fs-xs.fw-bold, "
             "div.fs-xs.fw-bold.mb-md, "
             ".industry, "
@@ -556,31 +670,21 @@ class BuiltInWorker(BasePortalWorker):
         return text
 
     async def _card_requirements_summary(self, card: Locator) -> str | None:
-        """Requirements / company summary text on the Built In list card (after expand)."""
-        # Prefer the text block immediately after the industry line.
-        industry_node = card.locator("div.mb-md.fs-xs.fw-bold, div.fs-xs.fw-bold.mb-md").first
-        if await industry_node.count():
-            sibling = industry_node.locator("xpath=following-sibling::*[1]")
-            if await sibling.count():
-                text = normalize_whitespace(await sibling.inner_text())
-                if self._looks_like_requirements_summary(text):
-                    return text
+        """Job requirements summary — full text from the expanded drop-data-* list card.
 
-        # Fallback selectors used on Built In expanded cards.
-        candidates = card.locator(
-            "div.fs-sm.fw-regular, "
-            "div.fs-sm.text-gray-03, "
-            "div.fs-xs.fw-regular:not(:has-text('Top Skills')), "
-            "p.fs-sm, "
-            "[data-id='job-summary'], "
-            "[data-id='company-description']"
-        )
-        count = await candidates.count()
-        for i in range(min(count, 8)):
-            text = normalize_whitespace(await candidates.nth(i).inner_text())
-            if self._looks_like_requirements_summary(text):
-                return text
-        return None
+        Exact Built In markup (from the card's own dropdown, never the detail page):
+            <div id="drop-data-{jobId}" class="collapse show">
+              ...
+              <div class="fs-sm fw-regular mb-md text-gray-04">FULL REQUIREMENTS TEXT</div>
+        Take the entire string as-is — no truncation or heuristic rejection.
+        """
+        node = card.locator(
+            "[id^='drop-data-'] div.fs-sm.fw-regular.mb-md.text-gray-04"
+        ).first
+        if await node.count() == 0:
+            return None
+        text = normalize_whitespace(await node.inner_text())
+        return text or None
 
     @staticmethod
     def _looks_like_requirements_summary(text: str | None) -> bool:
@@ -593,68 +697,40 @@ class BuiltInWorker(BasePortalWorker):
             return False
         if lowered in {"industry", "company", "skills required"}:
             return False
+        # Reject whole-card dumps mistakenly scraped as summary.
+        if "be an early applicant" in lowered:
+            return False
+        if lowered.count("posted") >= 2:
+            return False
+        if re.search(r"\b(?:posted|reposted)\b.+\b(?:ago|yesterday|today)\b", lowered) and len(text) > 220:
+            return False
         # Industry tags are usually short bullet lists without sentences.
         if "•" in text and "." not in text and len(text) < 80:
             return False
         return True
 
     async def _card_top_skills(self, card: Locator) -> list[str]:
-        """Read Built In card 'Top Skills:' chips/text from the list page."""
+        """Read Built In list-card Top Skills chips from the expanded drop-data-* panel.
+
+        Exact Built In markup:
+            <span class="fs-xs fw-bold text-uppercase text-gray-04 flex-shrink-0">Top Skills:</span>
+            <span class="d-md-inline ps-md-sm">
+              <span class="fs-xs text-gray-04 mx-sm">Skill</span>...
+            </span>
+        The chips' parent is `span.d-md-inline.ps-md-sm` — read every child span's full text.
+        """
         skills: list[str] = []
-        block = card.locator(
-            "div:has(span:text-is('Top Skills:')), "
-            "div:has(span:text-is('TOP SKILLS:')), "
-            "div:has-text('Top Skills:'), "
-            "div.border.rounded-2:has-text('Top Skills')"
-        ).first
-        if await block.count() == 0:
-            block = card
-
-        # Prefer chip spans next to the Top Skills label.
-        chips = block.locator(
-            "xpath=.//span[contains(translate(normalize-space(), "
-            "'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'top skills')]"
-            "/following-sibling::span[1]//span"
-        )
+        container = card.locator("[id^='drop-data-'] span.d-md-inline.ps-md-sm").first
+        if await container.count() == 0:
+            return skills
+        chips = container.locator("span")
         count = await chips.count()
-        if count == 0:
-            chips = block.locator(
-                "span.fs-xs.text-gray-04.mx-sm, "
-                "span.d-md-inline span.fs-xs, "
-                "span.fs-xs.text-gray-04"
-            )
-            count = await chips.count()
-
         for i in range(count):
             text = normalize_whitespace(await chips.nth(i).inner_text())
             if not text:
                 continue
-            lowered = text.lower()
-            if lowered in {"top skills:", "top skills", "top skills"}:
-                continue
-            if "," in text and len(text) > 40:
-                for part in re.split(r"\s*,\s*", text):
-                    token = normalize_whitespace(part)
-                    if token and token.lower() not in {"top skills:", "top skills"} and token not in skills:
-                        skills.append(token)
-                continue
             if text not in skills:
                 skills.append(text)
-
-        # Fallback: one text node "Top Skills: React, Python, ..."
-        if not skills:
-            label = block.locator(
-                "xpath=.//*[contains(translate(normalize-space(), "
-                "'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'top skills')]"
-            ).first
-            if await label.count():
-                raw = normalize_whitespace(await label.inner_text()) or ""
-                payload = re.sub(r"(?i)^top\s*skills:\s*", "", raw).strip()
-                if payload and payload.lower() != "top skills":
-                    for part in re.split(r"\s*,\s*", payload):
-                        token = normalize_whitespace(part)
-                        if token and token not in skills:
-                            skills.append(token)
         return skills
 
     async def _click_heart(self, card: Locator) -> None:
@@ -732,6 +808,142 @@ class BuiltInWorker(BasePortalWorker):
             return None
         return await link.get_attribute("href")
 
+    async def _card_location(self, card: Locator) -> str | None:
+        """Read location from Built In list card; expand multi-location tooltip when needed."""
+        multi = await self._read_multi_locations(card, card.page)
+        if multi:
+            return multi
+
+        # Single-location row (pin icon).
+        icon = card.locator("i.fa-location-dot, i[class*='fa-location']").first
+        if await icon.count():
+            row = icon.locator(
+                "xpath=ancestor::div[contains(@class,'d-flex') and contains(@class,'align-items')][1]"
+            )
+            if await row.count() == 0:
+                row = icon.locator("xpath=ancestor::div[contains(@class,'d-flex')][1]")
+            if await row.count():
+                text = normalize_whitespace(await row.inner_text())
+                cleaned = normalize_job_location(text)
+                if cleaned:
+                    return cleaned
+
+        # Fallback patterns on card text.
+        text_hit = await self._card_text_match(
+            card,
+            r"Hiring Remotely in [A-Za-z ,]+|"
+            r"Remote(?:ly)? in [A-Za-z ,]+|"
+            r"United States|USA|"
+            r"[A-Za-z .]+,\s*[A-Z]{2}(?:,\s*USA)?",
+        )
+        return normalize_job_location(text_hit)
+
+    async def _page_location(self, page: Page) -> str | None:
+        """Location from job detail page (supports multi-location hover)."""
+        multi = await self._read_multi_locations(page, page)
+        if multi:
+            return multi
+        location = await self._detail_icon_row_text(page, "fa-location-dot")
+        if not location:
+            location = await safe_inner_text(page, ".job-location, .location, [data-id='job-location']")
+        return normalize_job_location(location)
+
+    async def _read_multi_locations(self, root: Locator | Page, page: Page) -> str | None:
+        """If UI shows 'N Locations', hover and collect places from the opened tooltip."""
+        trigger = root.locator(
+            "a:has-text('Locations'), "
+            "button:has-text('Locations'), "
+            "span:has-text('Locations'), "
+            "div:has-text('Locations')"
+        ).filter(has_text=re.compile(r"^\s*\d+\s+Locations?\s*$", re.I)).first
+        if await trigger.count() == 0:
+            # Broader: any control whose visible text is like "8 Locations".
+            candidates = root.locator("a, button, span, div")
+            count = min(await candidates.count(), 40)
+            trigger = None
+            for i in range(count):
+                node = candidates.nth(i)
+                try:
+                    text = normalize_whitespace(await node.inner_text()) or ""
+                except Exception:
+                    continue
+                if re.fullmatch(r"\d+\s+Locations?", text, flags=re.I):
+                    trigger = node
+                    break
+            if trigger is None:
+                return None
+
+        try:
+            await trigger.scroll_into_view_if_needed(timeout=3000)
+            await trigger.hover(timeout=3000)
+            await page.wait_for_timeout(500)
+        except Exception as exc:
+            log_event(
+                logger,
+                f"Multi-location hover failed: {exc}",
+                portal=self.portal_name,
+                action="location",
+                level=30,
+            )
+            return None
+
+        tip = page.locator(
+            ".tippy-content:visible, "
+            "[data-popper-placement]:visible, "
+            "[role='tooltip']:visible, "
+            ".tooltip.show, "
+            ".popover.show, "
+            "div[class*='tooltip']:visible, "
+            "div[class*='Popover']:visible, "
+            "div[class*='popover']:visible"
+        ).last
+        places: list[str] = []
+        try:
+            if await tip.count():
+                tip_text = normalize_whitespace(await tip.inner_text()) or ""
+                for line in re.split(r"[\n•|/]+", tip_text):
+                    cleaned = normalize_job_location(line)
+                    if cleaned and cleaned not in places:
+                        # tip may return joined string; split again
+                        for part in cleaned.split(";"):
+                            token = part.strip()
+                            if token and token not in places:
+                                places.append(token)
+                # Prefer individual child nodes when available.
+                children = tip.locator("li, a, span, div, p")
+                child_count = min(await children.count(), 40)
+                child_places: list[str] = []
+                for i in range(child_count):
+                    child_text = normalize_whitespace(await children.nth(i).inner_text())
+                    cleaned = normalize_job_location(child_text)
+                    if not cleaned or ";" in cleaned:
+                        continue
+                    if len(cleaned) > 80:
+                        continue
+                    if cleaned not in child_places:
+                        child_places.append(cleaned)
+                if len(child_places) >= 2:
+                    places = child_places
+        except Exception:
+            places = []
+
+        try:
+            await page.mouse.move(0, 0)
+        except Exception:
+            pass
+
+        if len(places) >= 2:
+            log_event(
+                logger,
+                f"Resolved {len(places)} locations from tooltip",
+                portal=self.portal_name,
+                action="location",
+            )
+            return "; ".join(places)
+        if len(places) == 1:
+            return places[0]
+        return None
+
     async def _card_work_type(self, card: Locator) -> str | None:
         text = (await card.inner_text()).lower()
         if "fully remote" in text or re.search(r"\bremote\b", text):
@@ -755,31 +967,36 @@ class BuiltInWorker(BasePortalWorker):
             "a[href*='/company/'] h2, h2.text-pretty-blue, "
             "a[href*='/company/'].text-pretty-blue, .company-title, [data-id='company-title']",
         )
-        company_profile_url = await self._detail_company_profile_url(page) or raw_job.company_url
-        company_url = await self._fetch_company_website_from_profile(page, company_profile_url)
+        # Prefer website already resolved from the list-card company profile.
+        if raw_job.company_url and self._is_external_company_website(raw_job.company_url):
+            company_url = raw_job.company_url
+        else:
+            company_profile_url = await self._detail_company_profile_url(page) or raw_job.company_url
+            company_url = await self._fetch_company_website_from_profile(page, company_profile_url)
+            if not company_url:
+                company_url = company_profile_url
         posted_text = await self._detail_posted_text(page)
         posted = parse_posted_relative(posted_text)
         if posted.posted_at is None and raw_job.posted_at:
             posted.posted_at = raw_job.posted_at
         if raw_job.is_reposted:
             posted.is_reposted = True
-        location = await self._detail_icon_row_text(page, "fa-location-dot")
+        location = await self._page_location(page)
         if not location:
-            location = await safe_inner_text(page, ".job-location, .location, [data-id='job-location']")
+            location = raw_job.job_card_location
         work_type = await self._detail_icon_row_text(page, "fa-house-building")
         salary = await self._detail_icon_row_text(page, "fa-sack-dollar")
         if not salary:
             salary = await safe_inner_text(page, ".job-salary, .salary, [data-id='job-salary']")
         experience_level = await self._detail_icon_row_text(page, "fa-trophy")
         industry, company_headline = await self._detail_industry_and_headline(page)
-        apply_url = await self.extract_apply_url(page)
+        apply_url, is_easy_apply = await self._resolve_apply(page)
         # Evidence sources on Built In detail:
         # 1) job head (above), 2) match-background, 3) job-post-body-*, 4) Skills Required card.
         body = await self.extract_description(page)
-        match_background = await self._detail_match_background(page)
         skills_required, skills_text = await self._detail_skills_required(page)
         description = "\n\n".join(
-            part for part in [body, match_background, skills_text] if part
+            part for part in [body, skills_text] if part
         ) or None
         return JobDetail(
             source_portal=self.portal_name,
@@ -788,7 +1005,7 @@ class BuiltInWorker(BasePortalWorker):
             company=company or raw_job.job_card_company,
             company_url=company_url,
             company_headline=company_headline,
-            location=location or raw_job.job_card_location,
+            location=normalize_job_location(location or raw_job.job_card_location),
             salary_text=salary or raw_job.job_card_salary,
             industry=industry or raw_job.industry,
             work_type=work_type or raw_job.work_type,
@@ -797,17 +1014,13 @@ class BuiltInWorker(BasePortalWorker):
             posted_at=posted.posted_at or raw_job.posted_at,
             is_reposted=bool(posted.is_reposted or raw_job.is_reposted),
             skills_required=skills_required,
-            match_background_text=match_background,
+            # Requirements summary is never sourced from the detail page — list-card only.
+            match_background_text=None,
             portal_job_url=page.url or raw_job.portal_job_url,
-            apply_url=apply_url,
+            apply_url=None if is_easy_apply else apply_url,
+            is_easy_apply=is_easy_apply,
             raw_html=await page.content(),
             description_text=description,
-        )
-
-    async def _detail_match_background(self, page: Page) -> str | None:
-        return await safe_inner_text(
-            page,
-            "div.match-background, .match-background, [class*='match-background']",
         )
 
     async def _detail_skills_required(self, page: Page) -> tuple[list[str], str | None]:
@@ -864,34 +1077,54 @@ class BuiltInWorker(BasePortalWorker):
         return urljoin(BUILTIN_ORIGIN, href)
 
     async def _fetch_company_website_from_profile(self, page: Page, profile_url: str | None) -> str | None:
-        """Open Built In company page and read the external View Website href."""
+        """Open Built In company page in a side tab, save View Website, close tab.
+
+        Never navigates the caller's page away (list or job detail stays put).
+        """
         if not profile_url:
             return None
+        if self._is_external_company_website(profile_url):
+            return profile_url
         url = profile_url if profile_url.startswith("http") else urljoin(BUILTIN_ORIGIN, profile_url)
+        company_page = await page.context.new_page()
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(800)
-            link = page.locator(
+            await company_page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await company_page.wait_for_timeout(600)
+            await self._pass_builtin_security_captcha(company_page)
+            link = company_page.locator(
                 "a.hover-underline:has-text('View Website'), "
                 "a.font-barlow:has-text('View Website'), "
-                "a:has-text('View Website')"
+                "a:has-text('View Website'), "
+                "a[href*='utm_source=BuiltIn'][target='_blank'], "
+                "a[rel*='noopener'][href^='http']:has-text('Website')"
             ).first
+            # After captcha, content may load a beat later.
             if await link.count() == 0:
-                log_event(
-                    logger,
-                    f"No View Website link on company page: {url}",
-                    portal=self.portal_name,
-                    action="company_website",
-                    level=30,
-                )
-                return None
-            href = await link.get_attribute("href")
+                await company_page.wait_for_timeout(1200)
+            if await link.count() == 0:
+                # Fallback: first external http(s) link that is not Built In.
+                candidates = company_page.locator("a[href^='http']")
+                count = await candidates.count()
+                href = None
+                for i in range(min(count, 30)):
+                    candidate = await candidates.nth(i).get_attribute("href")
+                    if candidate and self._is_external_company_website(candidate):
+                        href = candidate
+                        break
+                if not href:
+                    log_event(
+                        logger,
+                        f"No View Website link on company page: {url}",
+                        portal=self.portal_name,
+                        action="company_website",
+                        level=30,
+                    )
+                    return None
+            else:
+                href = await link.get_attribute("href")
             if not href or not self._is_external_company_website(href):
                 return None
-            if href.startswith("http"):
-                website = href
-            else:
-                website = urljoin(BUILTIN_ORIGIN, href)
+            website = href if href.startswith("http") else urljoin(BUILTIN_ORIGIN, href)
             if not self._is_external_company_website(website):
                 return None
             log_event(
@@ -910,6 +1143,99 @@ class BuiltInWorker(BasePortalWorker):
                 level=30,
             )
             return None
+        finally:
+            try:
+                await company_page.close()
+            except Exception:
+                pass
+            try:
+                await page.bring_to_front()
+            except Exception:
+                pass
+
+    async def _pass_builtin_security_captcha(self, page: Page) -> bool:
+        """Click Built In analytics/security captcha checkbox when it blocks the company page.
+
+        Common widgets: reCAPTCHA checkbox, Cloudflare Turnstile, hCaptcha checkbox,
+        or an on-page "verify you are human" style checkbox.
+        """
+        clicked = False
+
+        # 1) On-page verify checkbox (non-iframe).
+        page_checks = page.locator(
+            "input[type='checkbox']:not([disabled]), "
+            "[role='checkbox'], "
+            "label:has-text('not a robot'), "
+            "label:has-text('Verify'), "
+            "label:has-text('human'), "
+            "button:has-text('Verify'), "
+            "div.cf-turnstile, "
+            "[class*='captcha'] input[type='checkbox'], "
+            "[id*='captcha'] input[type='checkbox']"
+        )
+        count = min(await page_checks.count(), 8)
+        for i in range(count):
+            control = page_checks.nth(i)
+            try:
+                if await control.is_visible(timeout=800):
+                    await control.click(timeout=2500, force=True)
+                    clicked = True
+                    break
+            except Exception:
+                continue
+
+        # 2) reCAPTCHA / hCaptcha / Turnstile iframes — click the checkbox inside.
+        if not clicked:
+            iframe_selectors = (
+                "iframe[src*='recaptcha']",
+                "iframe[title*='reCAPTCHA']",
+                "iframe[src*='hcaptcha']",
+                "iframe[title*='hCaptcha']",
+                "iframe[src*='turnstile']",
+                "iframe[src*='challenges.cloudflare']",
+                "iframe[title*='Widget containing a Cloudflare']",
+            )
+            for iframe_sel in iframe_selectors:
+                frames = page.locator(iframe_sel)
+                try:
+                    if await frames.count() == 0:
+                        continue
+                except Exception:
+                    continue
+                try:
+                    frame = page.frame_locator(iframe_sel).first
+                    box = frame.locator(
+                        "#recaptcha-anchor, "
+                        ".recaptcha-checkbox-border, "
+                        ".recaptcha-checkbox, "
+                        "#checkbox, "
+                        ".mark, "
+                        "input[type='checkbox'], "
+                        "[role='checkbox'], "
+                        "body"
+                    ).first
+                    await box.click(timeout=3500, force=True)
+                    clicked = True
+                    break
+                except Exception:
+                    continue
+
+        if clicked:
+            log_event(
+                logger,
+                "Clicked Built In security/analytics captcha checkbox",
+                portal=self.portal_name,
+                action="captcha",
+            )
+            await page.wait_for_timeout(1800)
+            # Wait briefly for challenge to clear / company content to render.
+            try:
+                await page.locator(
+                    "a:has-text('View Website'), a[href*='utm_source=BuiltIn']"
+                ).first.wait_for(state="visible", timeout=8000)
+            except Exception:
+                await page.wait_for_timeout(1200)
+        return clicked
 
     @staticmethod
     def _is_external_company_website(href: str) -> bool:

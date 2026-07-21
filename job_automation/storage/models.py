@@ -22,6 +22,8 @@ class JobRow(Base):
     company: Mapped[str | None] = mapped_column(String(512))
     company_url: Mapped[str | None] = mapped_column(Text)
     company_headline: Mapped[str | None] = mapped_column(Text)
+    requirements_summary: Mapped[str | None] = mapped_column(Text)
+    top_skills_json: Mapped[str | None] = mapped_column(Text)
     location: Mapped[str | None] = mapped_column(String(512))
     location_eligible: Mapped[str | None] = mapped_column(String(32))
     remote_policy: Mapped[str | None] = mapped_column(String(128))

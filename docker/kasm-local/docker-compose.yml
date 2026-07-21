@@ -13,7 +13,8 @@ services:
       - "127.0.0.1:6911:6901"
       - "127.0.0.1:9333:9223"
     environment:
-      # Start large; ?resize=remote makes the desktop follow the client window.
+      # Start large; Watch URL uses ?resize=remote so the desktop follows the client window.
+      # Do not pin Chrome with --window-size — Playwright uses the real window (no fixed viewport).
       VNC_RESOLUTION: "1920x1080"
       VNCOPTIONS: "-disableBasicAuth -AcceptSetDesktopSize 1"
       APP_ARGS: >-
@@ -23,7 +24,8 @@ services:
         --start-maximized
         --no-first-run
         --disable-session-crashed-bubble
-        --window-size=1920,1080
+        --disable-features=TranslateUI
+        --force-device-scale-factor=1
 
   kasm-cdp-1:
     image: alpine/socat

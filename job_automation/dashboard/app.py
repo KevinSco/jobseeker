@@ -105,17 +105,42 @@ def _clear_session_cookie(response: Response) -> None:
 def _kasm_view_targets() -> list[dict[str, str]]:
     cfg = KasmConfig.from_env()
     targets: list[dict[str, str]] = []
-    for index, url in enumerate(cfg.view_urls):
-        targets.append({"slot": str(index), "label": f"Browser {index + 1}", "url": url})
-    if not targets and cfg.view_url:
-        targets.append({"slot": "0", "label": "Browser 1", "url": cfg.view_url})
+    # Offline mode: one shared Chrome for everyone (first view URL only).
+    urls = list(cfg.view_urls)
+    if not urls and cfg.view_url:
+        urls = [cfg.view_url]
+    if cfg.is_offline and urls:
+        urls = urls[:1]
+    for index, url in enumerate(urls):
+        label = "Shared browser" if cfg.is_offline else f"Browser {index + 1}"
+        targets.append({"slot": str(index), "label": label, "url": url})
     return targets
+
+
+def _shared_kasm_sessions() -> list[dict[str, Any]]:
+    """Always-available Watch targets for the shared offline Chrome."""
+    cfg = KasmConfig.from_env()
+    if not cfg.enabled:
+        return []
+    return [
+        {
+            "portal": target["label"],
+            "kasm_id": f"shared-{target['slot']}",
+            "user_id": "shared",
+            "view_url": target["url"],
+            "status": "shared",
+        }
+        for target in _kasm_view_targets()
+    ]
 
 
 def _watch_url_for_session(session: dict[str, Any], index: int) -> str:
     """Prefer JobSeek-gated watch page over raw Kasm URL."""
     portal = (session.get("portal") or f"browser-{index + 1}").strip()
-    return f"/watch/{index}?portal={portal}"
+    # Offline shared browser always maps to slot 0.
+    cfg = KasmConfig.from_env()
+    slot = 0 if cfg.is_offline else index
+    return f"/watch/{slot}?portal={portal}"
 
 
 def create_app() -> FastAPI:
@@ -268,9 +293,17 @@ def create_app() -> FastAPI:
     @app.get("/api/search/status")
     async def search_status(request: Request) -> dict[str, Any]:
         status = get_search_status()
+        kasm = KasmConfig.from_env()
+        status = {**status, "kasm_enabled": bool(status.get("kasm_enabled") or kasm.enabled)}
         user = await get_optional_user(request)
         if user:
             sessions = status.get("kasm_sessions") or []
+            # One shared Chrome: fall back to configured Watch URL when search
+            # is idle, and collapse live sessions to a single Watch link.
+            if not sessions:
+                sessions = _shared_kasm_sessions()
+            elif kasm.is_offline and kasm.enabled:
+                sessions = sessions[:1] or _shared_kasm_sessions()
             status = {
                 **status,
                 "kasm_sessions": [
@@ -425,9 +458,18 @@ def create_app() -> FastAPI:
         async with session_scope() as session:
             repo = JobRepository(session)
             fields = payload.model_dump(exclude_none=True)
+            if "status" in fields and fields["status"] is not None:
+                fields["status"] = str(fields["status"]).strip().lower()
+                allowed = {"new", "saved", "applied", "hidden"}
+                if fields["status"] not in allowed:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid status. Allowed: {', '.join(sorted(allowed))}",
+                    )
             row = await repo.update_job(job_id, **fields)
             if not row:
                 raise HTTPException(status_code=404, detail="Job not found")
+            await session.flush()
             return _serialize_job(row, include_description=True)
 
     @app.post("/api/jobs/{job_id}/delete")
@@ -508,11 +550,11 @@ def create_app() -> FastAPI:
 
 def _serialize_job(row, *, include_description: bool = False) -> dict[str, Any]:
     evidence = json.loads(row.evidence_json) if row.evidence_json else []
-    skills_required = _evidence_list_value(evidence, "skills_required")
-    match_background = (
-        _evidence_text_value(evidence, "requirements_summary")
+    top_skills = _skills_from_row(row, evidence)
+    requirements_summary = (
+        getattr(row, "requirements_summary", None)
+        or _evidence_text_value(evidence, "requirements_summary")
         or _evidence_text_value(evidence, "match_background")
-        or getattr(row, "company_headline", None)
     )
     data = {
         "id": row.id,
@@ -521,6 +563,10 @@ def _serialize_job(row, *, include_description: bool = False) -> dict[str, Any]:
         "company": row.company,
         "company_url": row.company_url,
         "company_headline": getattr(row, "company_headline", None),
+        "requirements_summary": requirements_summary,
+        "match_background": requirements_summary,
+        "top_skills": top_skills,
+        "skills_required": top_skills,
         "location": row.location,
         "location_eligible": getattr(row, "location_eligible", None),
         "remote_policy": row.remote_policy,
@@ -533,10 +579,9 @@ def _serialize_job(row, *, include_description: bool = False) -> dict[str, Any]:
         "posted_text": getattr(row, "posted_text", None),
         "posted_at": f"{row.posted_at.isoformat()}Z" if getattr(row, "posted_at", None) else None,
         "is_reposted": bool(getattr(row, "is_reposted", False)),
-        "skills_required": skills_required,
-        "match_background": match_background,
         "decision": row.decision,
         "decision_reason": row.decision_reason,
+        "is_easy_apply": _is_easy_apply_job(row, evidence),
         "status": row.status or "new",
         "apply_url": row.apply_url,
         "job_url": row.job_url,
@@ -547,6 +592,34 @@ def _serialize_job(row, *, include_description: bool = False) -> dict[str, Any]:
     if include_description:
         data["description_text"] = row.description_text
     return data
+
+
+def _is_easy_apply_job(row: Any, evidence: list[Any]) -> bool:
+    reason = str(getattr(row, "decision_reason", None) or "").strip().lower()
+    if reason == "easy apply" or "easy apply" in reason:
+        return True
+    for item in evidence or []:
+        if isinstance(item, dict) and str(item.get("field") or "").lower() == "easy_apply":
+            return True
+    apply_url = str(getattr(row, "apply_url", None) or "").strip().lower()
+    return "builtin.com" in apply_url and "/apply/" in apply_url
+
+
+def _skills_from_row(row: Any, evidence: list[Any]) -> list[str]:
+    raw = getattr(row, "top_skills_json", None)
+    if raw:
+        try:
+            value = json.loads(raw)
+            if isinstance(value, list):
+                skills = [str(part).strip() for part in value if str(part).strip()]
+                if skills:
+                    return skills
+        except json.JSONDecodeError:
+            pass
+    return (
+        _evidence_list_value(evidence, "top_skills")
+        or _evidence_list_value(evidence, "skills_required")
+    )
 
 
 def _evidence_text_value(evidence: list[Any], field: str) -> str | None:

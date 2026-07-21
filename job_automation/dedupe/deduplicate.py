@@ -74,16 +74,37 @@ class DeduplicationEngine:
         return job
 
     def is_early_duplicate(self, source_job_id: str | None, job_url: str | None) -> bool:
-        """Early list skip: same job ID or same job URL only (never same-company alone)."""
+        """Early list skip: same job ID or same job URL only (never same-company alone).
+
+        Also skips jobs the user already hid — they must never reappear from a re-scrape.
+        """
         url = canonical_apply_url(job_url, job_url)
         for row in self.existing_jobs:
+            matched = False
+            if source_job_id and row.source_job_id and row.source_job_id == source_job_id:
+                matched = True
+            elif url and row.canonical_url and row.canonical_url == url:
+                matched = True
+            elif job_url and row.job_url and row.job_url.rstrip("/") == job_url.rstrip("/"):
+                matched = True
+            elif url and row.job_url and canonical_apply_url(row.job_url, row.job_url) == url:
+                matched = True
+            if not matched:
+                continue
+            return True
+        return False
+
+    def is_user_hidden(self, source_job_id: str | None, job_url: str | None) -> bool:
+        """True when a matching saved job was hidden by the user."""
+        url = canonical_apply_url(job_url, job_url)
+        for row in self.existing_jobs:
+            if (row.status or "").strip().lower() != "hidden":
+                continue
             if source_job_id and row.source_job_id and row.source_job_id == source_job_id:
                 return True
             if url and row.canonical_url and row.canonical_url == url:
                 return True
             if job_url and row.job_url and row.job_url.rstrip("/") == job_url.rstrip("/"):
-                return True
-            if url and row.job_url and canonical_apply_url(row.job_url, row.job_url) == url:
                 return True
         return False
 

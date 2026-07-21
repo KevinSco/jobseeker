@@ -100,6 +100,9 @@ class KasmConfig:
 
         max_sessions = int(os.getenv("KASM_MAX_SESSIONS", "1") or "1")
         max_sessions = max(1, min(max_sessions, 2))
+        # Offline local stack is one shared Chrome for every Watch viewer.
+        if mode == "offline":
+            max_sessions = 1
 
         cdp_endpoints = _split_csv(os.getenv("KASM_CDP_ENDPOINTS"))
         # Single-endpoint shortcut

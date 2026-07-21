@@ -27,6 +27,8 @@ INDEX_STATEMENTS = [
 COLUMN_MIGRATIONS = [
     ("jobs", "company_url", "ALTER TABLE jobs ADD COLUMN company_url TEXT"),
     ("jobs", "company_headline", "ALTER TABLE jobs ADD COLUMN company_headline TEXT"),
+    ("jobs", "requirements_summary", "ALTER TABLE jobs ADD COLUMN requirements_summary TEXT"),
+    ("jobs", "top_skills_json", "ALTER TABLE jobs ADD COLUMN top_skills_json TEXT"),
     ("jobs", "work_type", "ALTER TABLE jobs ADD COLUMN work_type VARCHAR(128)"),
     ("jobs", "posted_text", "ALTER TABLE jobs ADD COLUMN posted_text VARCHAR(128)"),
     ("jobs", "posted_at", "ALTER TABLE jobs ADD COLUMN posted_at DATETIME"),

@@ -42,6 +42,7 @@ class RawJob(BaseModel):
     job_card_url: str | None = None
     portal_job_url: str | None = None
     apply_url: str | None = None
+    is_easy_apply: bool = False
     industry: str | None = None
     work_type: str | None = None
     experience_level: str | None = None
@@ -78,6 +79,7 @@ class JobDetail(BaseModel):
     match_background_text: str | None = None
     portal_job_url: str | None = None
     apply_url: str | None = None
+    is_easy_apply: bool = False
     raw_html: str | None = None
     description_text: str | None = None
 
@@ -89,6 +91,8 @@ class NormalizedJob(BaseModel):
     company: str | None = None
     company_url: str | None = None
     company_headline: str | None = None
+    requirements_summary: str | None = None
+    top_skills: list[str] = Field(default_factory=list)
     location: str | None = None
     location_eligible: str | None = None  # Yes / No / Unknown (CT applicant)
     remote_policy: str | None = None
@@ -114,6 +118,7 @@ class NormalizedJob(BaseModel):
     skill_match: bool | None = None
     job_url: str | None = None
     apply_url: str | None = None
+    is_easy_apply: bool = False
     canonical_url: str | None = None
     description_text: str | None = None
     raw_html: str | None = None

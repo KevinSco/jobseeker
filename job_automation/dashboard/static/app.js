@@ -301,7 +301,7 @@ stopJobsBtn?.addEventListener("click", async () => {
   }
   const status = await response.json();
   setSearchControls(false);
-  renderKasmLinks([]);
+  renderKasmLinks(status.kasm_sessions);
   if (runsView?.classList.contains("hidden")) {
     stopLogPolling();
   }
@@ -475,6 +475,13 @@ async function submitAuthForm() {
     closeAuthModal();
     showCredentialToast(authMode === "signup" ? "Account created." : "Signed in.", "success");
     await loadCredentials();
+    try {
+      const statusResp = await fetch("/api/search/status");
+      const status = await statusResp.json();
+      renderKasmLinks(status.kasm_sessions);
+    } catch (_) {
+      /* ignore */
+    }
     if (next === "find-jobs") {
       await openFindJobsModal();
     } else if (next === "settings") {
@@ -591,17 +598,21 @@ async function loadJobs() {
   const companies = Number(data.companies || 0);
   if (jobsTotalCount) jobsTotalCount.textContent = formatCount(total);
   if (jobsCompanyCount) jobsCompanyCount.textContent = formatCount(companies);
-  visibleJobIds = (data.jobs || []).map((job) => Number(job.id));
+  // Belt-and-suspenders: never render user-hidden jobs even if API drifts.
+  const jobs = (data.jobs || []).filter(
+    (job) => String(job.status || "").toLowerCase() !== "hidden"
+  );
+  visibleJobIds = jobs.map((job) => Number(job.id));
   jobStacks.clear();
 
   if (activeEntity === "companies") {
     jobsList.className = "jobs-grid";
     jobsList.innerHTML =
-      renderJobsByCompany(data.jobs) || "<div class='muted jobs-empty'>No jobs found.</div>";
+      renderJobsByCompany(jobs) || "<div class='muted jobs-empty'>No jobs found.</div>";
   } else {
     jobsList.className = "jobs-grid";
     jobsList.innerHTML =
-      renderGroupedJobCards(data.jobs) || "<div class='muted jobs-empty'>No jobs found.</div>";
+      renderGroupedJobCards(jobs) || "<div class='muted jobs-empty'>No jobs found.</div>";
   }
 
   renderPagination(data.total, data.page, data.page_size);
@@ -685,6 +696,60 @@ function relativeTime(iso) {
   return new Date(normalized).toLocaleDateString();
 }
 
+function isEasyApply(job) {
+  if (!job) return false;
+  if (job.is_easy_apply === true) return true;
+  const reason = String(job.decision_reason || "").toLowerCase();
+  if (reason === "easy apply" || reason.includes("easy apply")) return true;
+  const evidence = Array.isArray(job.evidence) ? job.evidence : [];
+  if (evidence.some((item) => String(item?.field || "").toLowerCase() === "easy_apply")) {
+    return true;
+  }
+  const applyUrl = String(job.apply_url || "").toLowerCase();
+  return applyUrl.includes("builtin.com") && applyUrl.includes("/apply/");
+}
+
+function formatLocationLabel(location) {
+  const places = splitLocations(location);
+  if (!places.length) return { label: "Remote / Unknown", places: [], multi: false };
+  if (places.length === 1) return { label: places[0], places, multi: false };
+  return { label: `${places.length} Locations`, places, multi: true };
+}
+
+function splitLocations(location) {
+  if (!location) return [];
+  return String(location)
+    .split(/\s*;\s*/)
+    .map((part) =>
+      part
+        .trim()
+        .replace(/^(hiring\s+remotely\s+in|remotely\s+in|remote\s+in|hiring\s+in)\s+/i, "")
+        .trim()
+    )
+    .filter(Boolean)
+    .filter((part) => !/^\d+\s+locations?$/i.test(part));
+}
+
+function renderLocationHtml(location, { className = "job-location" } = {}) {
+  const info = formatLocationLabel(location);
+  if (!info.multi) {
+    return `<div class="${className}">
+      <span class="job-location-icon" aria-hidden="true"></span>
+      <span class="job-location-text">${escapeHtml(info.label)}</span>
+    </div>`;
+  }
+  const list = info.places
+    .map((place) => `<li>${escapeHtml(place)}</li>`)
+    .join("");
+  return `<div class="${className} job-location-multi">
+    <span class="job-location-icon" aria-hidden="true"></span>
+    <span class="job-location-text job-location-trigger" tabindex="0">${escapeHtml(info.label)}</span>
+    <div class="job-location-popover" role="tooltip">
+      <ul class="job-location-list">${list}</ul>
+    </div>
+  </div>`;
+}
+
 function formatPostedLabel(job) {
   if (!job) return "";
   const when = job.posted_at || job.created_at;
@@ -725,7 +790,7 @@ function renderCompanyStackCard(stackKey, jobs, index) {
 
 function renderJobCardBody(job, stackKey, index, stackCount) {
   const company = job.company || "Unknown company";
-  const location = job.location || "Remote / Unknown";
+  const locationHtml = renderLocationHtml(job.location);
   const salary = job.salary_text || "";
   const level = job.experience_level || "";
   const reason = job.decision_reason || "";
@@ -737,19 +802,23 @@ function renderJobCardBody(job, stackKey, index, stackCount) {
   const posted = formatPostedLabel(job);
   const industry = job.industry || "";
   const requirements =
+    job.requirements_summary ||
     job.match_background ||
-    job.company_headline ||
-    evidenceText(job.evidence, "skill_match") ||
-    (decision === "eligible" ? reason : "") ||
+    evidenceText(job.evidence, "requirements_summary") ||
     "";
-  const skills = Array.isArray(job.skills_required)
-    ? job.skills_required
-    : skillsFromEvidence(job.evidence);
+  const skills = Array.isArray(job.top_skills) && job.top_skills.length
+    ? job.top_skills
+    : Array.isArray(job.skills_required) && job.skills_required.length
+      ? job.skills_required
+      : skillsFromEvidence(job.evidence);
   const isSaved = status === "saved" || status === "applied";
   const isApplied = status === "applied";
   const showSnippet = decision === "needs_review" || decision === "rejected";
 
   const metaTags = [];
+  if (isEasyApply(job)) {
+    metaTags.push(`<span class="job-tag easy-apply">Easy Apply</span>`);
+  }
   if (salary && salary !== "Not listed") {
     metaTags.push(`<span class="job-tag salary">${escapeHtml(salary)}</span>`);
   }
@@ -763,7 +832,7 @@ function renderJobCardBody(job, stackKey, index, stackCount) {
   else if (isSaved) metaTags.push(`<span class="job-tag status-saved">Saved</span>`);
 
   const skillTags = skills
-    .slice(0, 6)
+    .slice(0, 12)
     .map((skill) => `<span class="job-tag skill">${escapeHtml(skill)}</span>`)
     .join("");
 
@@ -817,10 +886,7 @@ function renderJobCardBody(job, stackKey, index, stackCount) {
         <h3 class="job-title">${escapeHtml(job.title || "Untitled")}</h3>
         ${posted ? `<span class="job-posted">${escapeHtml(posted)}</span>` : ""}
       </div>
-      <div class="job-location">
-        <span class="job-location-icon" aria-hidden="true"></span>
-        <span>${escapeHtml(location)}</span>
-      </div>
+      ${locationHtml}
       ${
         decision
           ? `<div class="job-status-row"><span class="job-tag decision ${escapeHtml(decision)}">${escapeHtml(decisionLabel(decision))}</span></div>`
@@ -839,7 +905,11 @@ function renderJobCardBody(job, stackKey, index, stackCount) {
           ? `<p class="job-requirements">${escapeHtml(requirements)}</p>`
           : ""
       }
-      ${skillTags ? `<div class="job-tags job-skills">${skillTags}</div>` : ""}
+      ${
+        skillTags
+          ? `<div class="job-tags job-skills"><span class="job-skills-label">Top Skills</span>${skillTags}</div>`
+          : ""
+      }
       ${
         showSnippet && reason
           ? `<p class="job-snippet"><span class="job-snippet-icon" aria-hidden="true">!</span><span class="job-snippet-text">${escapeHtml(reason)}</span></p>`
@@ -862,7 +932,9 @@ function renderJobCardBody(job, stackKey, index, stackCount) {
 
 function skillsFromEvidence(evidence) {
   if (!Array.isArray(evidence)) return [];
-  const item = evidence.find((entry) => String(entry?.field || "").toLowerCase() === "skills_required");
+  const item =
+    evidence.find((entry) => String(entry?.field || "").toLowerCase() === "top_skills") ||
+    evidence.find((entry) => String(entry?.field || "").toLowerCase() === "skills_required");
   if (!item) return [];
   if (Array.isArray(item.value)) {
     return item.value.map((part) => String(part).trim()).filter(Boolean);
@@ -949,20 +1021,18 @@ async function handleJobCardAction(action, jobId, card) {
       return;
     }
     if (action === "hide") {
-      await patchJobFields(id, { status: "hidden" });
-      if (stack && stackKey) {
-        const idx = stack.jobs.findIndex((job) => Number(job.id) === id);
-        if (idx >= 0) stack.jobs.splice(idx, 1);
-        if (!stack.jobs.length) {
-          jobStacks.delete(stackKey);
-          card?.remove();
-          await loadJobs();
-          return;
-        }
-        const nextIndex = Math.min(idx, stack.jobs.length - 1);
-        setCompanyStackIndex(stackKey, nextIndex);
-        return;
+      const updated = await patchJobFields(id, { status: "hidden" });
+      if (String(updated.status || "").toLowerCase() !== "hidden") {
+        throw new Error("Hide failed to save. Please refresh and try again.");
       }
+      // Remove from every in-memory stack, then always reload from the API
+      // so a stacked "next job" cannot look like the hidden one came back.
+      for (const [key, entry] of jobStacks.entries()) {
+        entry.jobs = entry.jobs.filter((job) => Number(job.id) !== id);
+        if (!entry.jobs.length) jobStacks.delete(key);
+      }
+      card?.remove();
+      closeJobDetailDrawer();
       await loadJobs();
     }
   } catch (error) {
@@ -1019,7 +1089,7 @@ function bindOneJobCard(card) {
   };
 
   const interactiveSelector =
-    "a, button, .job-select, .job-stack-slider, .job-view-all-btn, .job-icon-btn, .job-tool-btn, .job-posting-link, .job-card-footer";
+    "a, button, .job-select, .job-stack-slider, .job-view-all-btn, .job-icon-btn, .job-tool-btn, .job-posting-link, .job-card-footer, .job-location-multi";
 
   const startPress = (event) => {
     if (event.type === "mousedown" && event.button !== 0) return;
@@ -1183,7 +1253,7 @@ function closeJobDetailDrawer() {
 
 function renderCompanyModalJobCard(job, focusedId) {
   const company = job.company || "Unknown company";
-  const location = job.location || "Remote / Unknown";
+  const locationHtml = renderLocationHtml(job.location);
   const salary = job.salary_text || "";
   const workType = job.work_type || "";
   const level = job.experience_level || "";
@@ -1197,6 +1267,9 @@ function renderCompanyModalJobCard(job, focusedId) {
   const focused = Number(job.id) === Number(focusedId) ? "focused" : "";
 
   const tags = [];
+  if (isEasyApply(job)) {
+    tags.push(`<span class="job-tag easy-apply">Easy Apply</span>`);
+  }
   if (salary && salary !== "Not listed") {
     tags.push(`<span class="job-tag salary">${escapeHtml(salary)}</span>`);
   }
@@ -1224,10 +1297,7 @@ function renderCompanyModalJobCard(job, focusedId) {
         <h3 class="job-title">${escapeHtml(job.title || "Untitled")}</h3>
         ${posted ? `<span class="job-posted">${escapeHtml(posted)}</span>` : ""}
       </div>
-      <div class="job-location">
-        <span class="job-location-icon" aria-hidden="true"></span>
-        <span>${escapeHtml(location)}</span>
-      </div>
+      ${locationHtml}
       ${tags.length ? `<div class="job-tags">${tags.join("")}</div>` : ""}
       <div class="job-company">
         <div class="job-company-avatar" aria-hidden="true">${escapeHtml(companyInitials(company))}</div>
@@ -1417,6 +1487,9 @@ async function openJobDetailScreen(jobId, stackKey = null) {
     .join("");
 
   const tags = [];
+  if (isEasyApply(job)) {
+    tags.push(`<span class="job-tag easy-apply">Easy Apply</span>`);
+  }
   if (job.salary_text && job.salary_text !== "Not listed") {
     tags.push(`<span class="job-tag salary">${escapeHtml(job.salary_text)}</span>`);
   }
@@ -1463,16 +1536,28 @@ async function openJobDetailScreen(jobId, stackKey = null) {
               : ""
           }
         </div>
-        <div class="job-location jd-location">
-          <span class="job-location-icon" aria-hidden="true"></span>
-          <span>${escapeHtml(job.location || "Remote / Unknown")}</span>
-        </div>
+        ${renderLocationHtml(job.location, { className: "job-location jd-location" })}
         ${tags.length ? `<div class="job-tags jd-tags">${tags.join("")}</div>` : ""}
 
         <div class="jd-panel active" data-panel="info">
           ${
+            job.requirements_summary || job.match_background
+              ? `<section class="jd-section"><h3>Requirements</h3><p>${escapeHtml(job.requirements_summary || job.match_background)}</p></section>`
+              : ""
+          }
+          ${
+            (Array.isArray(job.top_skills) && job.top_skills.length) ||
+            (Array.isArray(job.skills_required) && job.skills_required.length)
+              ? `<section class="jd-section"><h3>Top Skills</h3><div class="job-tags">${(
+                  job.top_skills?.length ? job.top_skills : job.skills_required
+                )
+                  .map((skill) => `<span class="job-tag skill">${escapeHtml(skill)}</span>`)
+                  .join("")}</div></section>`
+              : ""
+          }
+          ${
             job.decision_reason
-              ? `<section class="jd-section"><h3>Summary</h3><p>${escapeHtml(job.decision_reason)}</p></section>`
+              ? `<section class="jd-section"><h3>Decision</h3><p>${escapeHtml(job.decision_reason)}</p></section>`
               : ""
           }
           <section class="jd-section">
@@ -1579,7 +1664,14 @@ async function openJobDetailScreen(jobId, stackKey = null) {
           job.status = updated.status || next;
           syncJobInStacks(job.id, { status: job.status });
         } else if (action === "hide") {
-          await patchJobFields(job.id, { status: "hidden" });
+          const updated = await patchJobFields(job.id, { status: "hidden" });
+          if (String(updated.status || "").toLowerCase() !== "hidden") {
+            throw new Error("Hide failed to save. Please refresh and try again.");
+          }
+          for (const [key, entry] of jobStacks.entries()) {
+            entry.jobs = entry.jobs.filter((item) => Number(item.id) !== Number(job.id));
+            if (!entry.jobs.length) jobStacks.delete(key);
+          }
           closeJobDetailDrawer();
           await loadJobs();
           return;
@@ -2286,7 +2378,7 @@ async function pollSearchStatus() {
     }
     clearInterval(searchPollTimer);
     setSearchControls(false);
-    renderKasmLinks([]);
+    renderKasmLinks(status.kasm_sessions);
     // Keep log polling only while Runs tab is open.
     if (runsView?.classList.contains("hidden")) {
       stopLogPolling();
@@ -2325,11 +2417,22 @@ function renderKasmLinks(sessions) {
     kasmLinks.innerHTML = "";
     return;
   }
+  // One shared Chrome for everyone — a single Watch link.
+  const unique = [];
+  const seen = new Set();
+  for (const s of list) {
+    const key = s.view_url;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(s);
+  }
+  const shown = unique.slice(0, 1);
   kasmLinks.hidden = false;
-  kasmLinks.innerHTML = list
+  kasmLinks.innerHTML = shown
     .map((s) => {
-      const label = PORTAL_LABELS[s.portal] || s.portal || "Kasm";
-      return `<a class="kasm-link" href="${escapeHtml(s.view_url)}" target="_blank" rel="noopener noreferrer">Watch ${escapeHtml(label)}</a>`;
+      const label = PORTAL_LABELS[s.portal] || s.portal || "browser";
+      const text = /shared/i.test(String(label)) ? "Watch shared browser" : `Watch ${label}`;
+      return `<a class="kasm-link" href="${escapeHtml(s.view_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text)}</a>`;
     })
     .join("");
 }
@@ -2369,6 +2472,7 @@ async function init() {
     pollSearchStatus();
   } else {
     setSearchControls(false);
+    renderKasmLinks(status.kasm_sessions);
   }
 }
 

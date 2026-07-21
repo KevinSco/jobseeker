@@ -33,12 +33,12 @@ class RuleEngine:
         if review_reason:
             job.decision = Decision.NEEDS_REVIEW
             job.decision_reason = review_reason
-            if self.is_easy_apply(job.apply_url):
+            if job.is_easy_apply or self.is_easy_apply(job.apply_url):
                 job.evidence.append(
                     Evidence(
                         field="easy_apply",
                         value=True,
-                        evidence_text=job.apply_url or "Easy Apply",
+                        evidence_text="Easy Apply (Built In internal apply — no external ATS link)",
                         source="apply_url",
                     )
                 )
@@ -48,6 +48,22 @@ class RuleEngine:
             return job
 
         if self._is_eligible(job):
+            # Easy Apply must never stay eligible — human reviews later.
+            if job.is_easy_apply or self.is_easy_apply(job.apply_url):
+                job.decision = Decision.NEEDS_REVIEW
+                job.decision_reason = "easy apply"
+                job.evidence.append(
+                    Evidence(
+                        field="easy_apply",
+                        value=True,
+                        evidence_text="Otherwise eligible but Easy Apply — needs review",
+                        source="apply_url",
+                    )
+                )
+                job.evidence.append(
+                    Evidence(field="decision", value="needs_review", evidence_text="easy apply")
+                )
+                return job
             # Same company+title at a different location: good fit still needs human review.
             if self.dedupe_engine and self.dedupe_engine.has_same_role_different_location(job):
                 job.decision = Decision.NEEDS_REVIEW
@@ -129,7 +145,7 @@ class RuleEngine:
         return None
 
     def _check_needs_review(self, job: NormalizedJob) -> str | None:
-        apply_review = self._apply_link_review_reason(job.apply_url)
+        apply_review = self._apply_link_review_reason(job)
         if apply_review:
             return apply_review
         if job.skill_match is None:
@@ -162,18 +178,21 @@ class RuleEngine:
             return "Experience level unclear"
         return None
 
-    def _apply_link_review_reason(self, apply_url: str | None) -> str | None:
-        if not apply_url or not str(apply_url).strip():
-            return "apply link error"
-        if self.is_easy_apply(apply_url):
+    def _apply_link_review_reason(self, job: NormalizedJob) -> str | None:
+        if job.is_easy_apply or self.is_easy_apply(job.apply_url):
             return "easy apply"
+        if not job.apply_url or not str(job.apply_url).strip():
+            return "apply link error"
         return None
 
     @staticmethod
     def is_easy_apply(apply_url: str | None) -> bool:
         if not apply_url:
             return False
-        return "/apply/job/" in str(apply_url).strip().lower()
+        lowered = str(apply_url).strip().lower()
+        if "/apply/job/" in lowered:
+            return True
+        return "builtin.com" in lowered and "/apply/" in lowered
 
     def _banned_industry_hit(self, industry: str | None) -> str | None:
         if not industry:

@@ -28,18 +28,20 @@ BUILTIN_LIST_HTML = """
     <div>3 Hours Ago · Remote · United States · 120K Annually</div>
     <button id="job-dropdown-button" type="button" class="dropdown">Expand</button>
     <button type="button" aria-label="Save job" class="heart">Heart</button>
-    <div class="mb-md fs-xs fw-bold industry" style="display:none">Cybersecurity</div>
-    <div class="fs-sm fw-regular requirements-summary" style="display:none">
-      Build secure platforms for enterprise customers with strong Python and cloud skills.
-    </div>
-    <div class="border rounded-2 mt-md p-sm">
-      <span class="fs-xs fw-bold text-uppercase">Top Skills:</span>
-      <span class="d-md-inline ps-md-sm">
-        <span class="fs-xs text-gray-04 mx-sm">React</span>
-        <span class="fs-xs text-gray-04 mx-sm">Storybook</span>
-        <span class="fs-xs text-gray-04 mx-sm">Tailwind</span>
-        <span class="fs-xs text-gray-04 mx-sm">Typescript</span>
-      </span>
+    <div id="drop-data-1" class="collapse" data-job-id="1">
+      <div class="mb-md fs-xs fw-bold industry">Cybersecurity</div>
+      <div class="fs-sm fw-regular mb-md text-gray-04">
+        Build secure platforms for enterprise customers with strong Python and cloud skills.
+      </div>
+      <div class="border rounded-2 border-gray-01 mt-md p-sm">
+        <span class="fs-xs fw-bold text-uppercase text-gray-04">Top Skills:</span>
+        <span class="d-md-inline ps-md-sm">
+          <span class="fs-xs text-gray-04 mx-sm">React</span>
+          <span class="fs-xs text-gray-04 mx-sm">Storybook</span>
+          <span class="fs-xs text-gray-04 mx-sm">Tailwind</span>
+          <span class="fs-xs text-gray-04 mx-sm">Typescript</span>
+        </span>
+      </div>
     </div>
   </div>
 
@@ -49,18 +51,20 @@ BUILTIN_LIST_HTML = """
     <div>3 Hours Ago · Remote · United States · 100K-130K Annually · Senior level</div>
     <button id="job-dropdown-button" type="button" class="dropdown">Expand</button>
     <button type="button" aria-label="Save job" class="heart">Heart</button>
-    <div class="mb-md fs-xs fw-bold industry" style="display:none">Software</div>
-    <div class="fs-sm fw-regular requirements-summary" style="display:none">
-      Ship device OS UI with TypeScript and React for a fully remote US team.
-    </div>
-    <div class="border rounded-2 mt-md p-sm">
-      <span class="fs-xs fw-bold text-uppercase">Top Skills:</span>
-      <span class="d-md-inline ps-md-sm">
-        <span class="fs-xs text-gray-04 mx-sm">TypeScript</span>
-        <span class="fs-xs text-gray-04 mx-sm">React</span>
-        <span class="fs-xs text-gray-04 mx-sm">Python</span>
-        <span class="fs-xs text-gray-04 mx-sm">Node.js</span>
-      </span>
+    <div id="drop-data-2" class="collapse" data-job-id="2">
+      <div class="mb-md fs-xs fw-bold industry">Software</div>
+      <div class="fs-sm fw-regular mb-md text-gray-04">
+        Ship device OS UI with TypeScript and React for a fully remote US team.
+      </div>
+      <div class="border rounded-2 border-gray-01 mt-md p-sm">
+        <span class="fs-xs fw-bold text-uppercase text-gray-04">Top Skills:</span>
+        <span class="d-md-inline ps-md-sm">
+          <span class="fs-xs text-gray-04 mx-sm">TypeScript</span>
+          <span class="fs-xs text-gray-04 mx-sm">React</span>
+          <span class="fs-xs text-gray-04 mx-sm">Python</span>
+          <span class="fs-xs text-gray-04 mx-sm">Node.js</span>
+        </span>
+      </div>
     </div>
   </div>
 
@@ -70,9 +74,11 @@ BUILTIN_LIST_HTML = """
     <div>Yesterday · Remote · United States · 140K Annually</div>
     <button id="job-dropdown-button" type="button" class="dropdown">Expand</button>
     <button type="button" aria-label="Save job" class="heart">Heart</button>
-    <div class="mb-md fs-xs fw-bold industry" style="display:none">Internet</div>
-    <div class="fs-sm fw-regular requirements-summary" style="display:none">
-      Build Python services for a consumer internet product.
+    <div id="drop-data-3" class="collapse" data-job-id="3">
+      <div class="mb-md fs-xs fw-bold industry">Internet</div>
+      <div class="fs-sm fw-regular mb-md text-gray-04">
+        Build Python services for a consumer internet product.
+      </div>
     </div>
   </div>
 
@@ -86,12 +92,12 @@ BUILTIN_LIST_HTML = """
     document.querySelector('ul[x-ref="locationDropdownMenu"] label').addEventListener('click', () => {
       document.getElementById('locationDropdownInput-JobBoard').value = 'United States';
       document.getElementById('status').textContent = 'location=United States';
-      document.querySelector('ul[x-ref="locationDropdownMenu"]').classList.add('hidden');
     });
     document.getElementById('remotePreferenceDropdownButton').addEventListener('click', () => {
       document.getElementById('remote-options').classList.remove('hidden');
     });
     document.querySelector('#remote-options button').addEventListener('click', () => {
+      document.getElementById('remotePreferenceDropdownButton').textContent = 'Fully Remote';
       document.getElementById('status').textContent = 'remote=Fully Remote';
     });
     document.getElementById('postedDateDropdownButton').addEventListener('click', () => {
@@ -104,9 +110,8 @@ BUILTIN_LIST_HTML = """
     document.querySelectorAll('.dropdown').forEach((btn) => {
       btn.addEventListener('click', () => {
         const card = btn.parentElement;
-        card.querySelector('.industry').style.display = 'block';
-        const summary = card.querySelector('.requirements-summary');
-        if (summary) summary.style.display = 'block';
+        const panel = card.querySelector('[id^="drop-data-"]');
+        if (panel) panel.classList.add('show');
       });
     });
     document.querySelectorAll('.heart').forEach((btn) => {
@@ -116,7 +121,7 @@ BUILTIN_LIST_HTML = """
       });
     });
   </script>
-  <style>.hidden{display:none}</style>
+  <style>.hidden{display:none} .collapse:not(.show){display:none}</style>
 </body>
 </html>
 """
