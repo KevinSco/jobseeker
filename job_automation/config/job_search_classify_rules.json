@@ -362,6 +362,7 @@
     "Help Desk Engineer"
   ],
   "experience_levels": [
+    "Entry Level",
     "Junior Level",
     "Mid Level",
     "Senior Level"
@@ -372,6 +373,7 @@
     "Contract"
   ],
   "location": "United States",
+  "applicant_location": "Connecticut",
   "salary": {
     "min_annual": 80000,
     "min_hourly": 50
@@ -380,28 +382,50 @@
     "travel_required": [
       "travel required",
       "requires travel",
+      "willingness to travel",
+      "must travel",
+      "travel may be required",
       "up to 10% travel",
       "up to 20% travel",
       "up to 25% travel",
+      "travel percentage",
       "occasional travel",
+      "periodic travel",
       "frequent travel",
       "domestic travel",
       "international travel",
       "travel to client sites",
       "travel to office",
-      "on-site client visits"
+      "on-site client visits",
+      "client meetings required",
+      "customer visits required",
+      "office visits required"
     ],
     "travel_not_required": [
       "no travel required",
       "travel not required",
-      "0% travel"
+      "0% travel",
+      "travel percentage: none",
+      "travel: none",
+      "travel is optional",
+      "optional travel",
+      "welcome to visit",
+      "encouraged to visit",
+      "hope to visit",
+      "discretionary stipend",
+      "social travel",
+      "travel stipend",
+      "co-working stipend"
     ],
     "clearance": [
       "security clearance",
       "clearance required",
       "active clearance",
+      "clearance eligibility",
       "must be able to obtain clearance",
       "must obtain clearance",
+      "ability to obtain",
+      "ability to maintain a clearance",
       "public trust",
       "secret clearance",
       "top secret",
@@ -410,31 +434,28 @@
       "polygraph",
       "dod clearance",
       "department of defense clearance",
-      "federal clearance"
+      "federal clearance",
+      "government suitability",
+      "classified information",
+      "fingerprint",
+      "fingerprinting",
+      "biometric screening",
+      "biometric"
     ],
     "security_related": [
-      "cybersecurity",
-      "cyber security",
-      "security platform",
-      "security engineer",
-      "application security",
-      "appsec",
-      "cloud security",
-      "identity security",
-      "endpoint protection",
-      "threat detection",
-      "threat intelligence",
-      "incident response",
-      "vulnerability management",
-      "soc",
-      "siem",
-      "devsecops",
-      "zero trust",
-      "fraud detection",
-      "risk intelligence",
-      "compliance security",
-      "information security",
-      "infosec"
+      "cybersecurity company",
+      "cyber security company",
+      "security company",
+      "defense contractor",
+      "defence contractor",
+      "federal contractor",
+      "government contractor",
+      "homeland security",
+      "military technology",
+      "national security",
+      "government mission support",
+      "defense industry",
+      "aerospace & defense"
     ],
     "government_industry": [
       "government contractor",
@@ -444,14 +465,33 @@
       "department of defense",
       "dod contractor",
       "public sector contractor",
-      "public sector"
+      "homeland security",
+      "national security",
+      "military technology",
+      "government mission support"
+    ],
+    "restricted_company_industry": [
+      "security",
+      "cybersecurity",
+      "cyber security",
+      "defense",
+      "defence",
+      "federal contracting",
+      "federal contractor",
+      "government",
+      "homeland security",
+      "military technology",
+      "national security",
+      "government mission support",
+      "aerospace & defense"
     ],
     "onsite": [
       "onsite required",
       "on-site required",
       "in-office required",
       "must work onsite",
-      "must work on-site"
+      "must work on-site",
+      "must work in office"
     ],
     "hybrid": [
       "hybrid",
@@ -461,10 +501,46 @@
     "fully_remote": [
       "fully remote",
       "100% remote",
+      "remote-first",
+      "remote first",
+      "work from home",
+      "work from anywhere",
+      "location type: remote",
       "remote within the united states",
+      "u.s. remote",
+      "us remote",
+      "usa remote",
       "remote - us",
+      "remote us",
       "work from anywhere in the us",
-      "remote (us)"
+      "remote (us)",
+      "nationwide remote",
+      "virtual"
+    ],
+    "onsite_onboarding": [
+      "on-site onboarding",
+      "onsite onboarding",
+      "in-person onboarding",
+      "in person onboarding",
+      "first day in office",
+      "first week in office",
+      "orientation in person",
+      "initial training in person",
+      "equipment pickup",
+      "pick up equipment",
+      "travel for onboarding",
+      "initial office visit",
+      "must report to office for onboarding"
+    ],
+    "remote_onboarding": [
+      "remote onboarding",
+      "virtual onboarding",
+      "onboarding is remote",
+      "equipment is shipped",
+      "equipment shipped",
+      "ship laptop",
+      "home-office stipend",
+      "home office stipend"
     ]
   },
   "portals": [

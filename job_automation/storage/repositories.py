@@ -9,8 +9,20 @@ from typing import Any
 from sqlalchemy import Select, case, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from job_automation.browser.credentials import (
+    SUPPORTED_PORTALS,
+    PortalCredential,
+    decrypt_secret,
+    encrypt_secret,
+)
 from job_automation.models.domain import Decision, Evidence, NormalizedJob, PortalRunStatus
-from job_automation.storage.models import BannedCompanyRow, JobRow, JobSourceRow, PortalRunRow
+from job_automation.storage.models import (
+    BannedCompanyRow,
+    JobRow,
+    JobSourceRow,
+    PortalCredentialRow,
+    PortalRunRow,
+)
 
 
 def _evidence_to_json(evidence: list[Evidence]) -> str:
@@ -32,7 +44,9 @@ def job_row_to_normalized(row: JobRow) -> NormalizedJob:
         company_url=row.company_url,
         company_headline=row.company_headline,
         location=row.location,
+        location_eligible=getattr(row, "location_eligible", None),
         remote_policy=row.remote_policy,
+        remote_eligible=getattr(row, "remote_eligible", None),
         work_type=row.work_type,
         commitment=row.commitment,
         experience_level=row.experience_level,
@@ -43,8 +57,11 @@ def job_row_to_normalized(row: JobRow) -> NormalizedJob:
         salary_min_hourly=row.salary_min_hourly,
         salary_max_hourly=row.salary_max_hourly,
         posted_text=row.posted_text,
+        posted_at=getattr(row, "posted_at", None),
+        is_reposted=bool(getattr(row, "is_reposted", False)),
         security_clearance_required=row.security_clearance_required,
         travel_required=row.travel_required,
+        onsite_onboarding=getattr(row, "onsite_onboarding", None),
         security_related_company_or_role=row.security_related_company_or_role,
         role_excluded=row.role_excluded,
         job_url=row.job_url,
@@ -123,7 +140,9 @@ class JobRepository:
         row.company_url = job.company_url
         row.company_headline = job.company_headline
         row.location = job.location
+        row.location_eligible = job.location_eligible
         row.remote_policy = job.remote_policy
+        row.remote_eligible = job.remote_eligible
         row.work_type = job.work_type
         row.commitment = job.commitment
         row.experience_level = job.experience_level
@@ -134,8 +153,11 @@ class JobRepository:
         row.salary_min_hourly = job.salary_min_hourly
         row.salary_max_hourly = job.salary_max_hourly
         row.posted_text = job.posted_text
+        row.posted_at = job.posted_at
+        row.is_reposted = bool(job.is_reposted)
         row.security_clearance_required = job.security_clearance_required
         row.travel_required = job.travel_required
+        row.onsite_onboarding = job.onsite_onboarding
         row.security_related_company_or_role = job.security_related_company_or_role
         row.role_excluded = job.role_excluded
         row.job_url = job.job_url
@@ -205,6 +227,8 @@ class JobRepository:
         page_size: int = 20,
     ) -> tuple[list[JobRow], int, int]:
         stmt: Select[tuple[JobRow]] = select(JobRow)
+        # User-hidden jobs stay out of the browse grid.
+        stmt = stmt.where(or_(JobRow.status.is_(None), JobRow.status != "hidden"))
         if decision:
             stmt = stmt.where(JobRow.decision.in_(decision))
         elif not show_hidden:
@@ -413,3 +437,99 @@ class BannedCompanyRepository:
         self.session.add(row)
         await self.session.flush()
         return row
+
+
+class PortalCredentialRepository:
+    """Per-user encrypted job-portal credentials."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def list_for_user(self, user_id: int) -> list[PortalCredentialRow]:
+        result = await self.session.execute(
+            select(PortalCredentialRow).where(PortalCredentialRow.user_id == user_id)
+        )
+        return list(result.scalars().all())
+
+    async def get(self, user_id: int, portal: str) -> PortalCredentialRow | None:
+        result = await self.session.execute(
+            select(PortalCredentialRow)
+            .where(
+                PortalCredentialRow.user_id == user_id,
+                PortalCredentialRow.portal == portal,
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def upsert(
+        self,
+        user_id: int,
+        portal: str,
+        *,
+        username: str,
+        password: str | None,
+        login_url: str | None = None,
+        email_app_password: str | None = None,
+    ) -> PortalCredentialRow:
+        if portal not in SUPPORTED_PORTALS:
+            raise ValueError(f"Unsupported portal: {portal}")
+        row = await self.get(user_id, portal)
+        if row is None:
+            if not password and portal != "builtin":
+                raise ValueError("Password is required")
+            row = PortalCredentialRow(
+                user_id=user_id,
+                portal=portal,
+                username=username.strip(),
+                password_enc=encrypt_secret(password or "magic-link-placeholder") or "",
+                login_url=login_url,
+                email_app_password_enc=encrypt_secret(email_app_password),
+            )
+            self.session.add(row)
+        else:
+            row.username = username.strip()
+            row.login_url = login_url
+            if password:
+                row.password_enc = encrypt_secret(password) or row.password_enc
+            if email_app_password:
+                row.email_app_password_enc = encrypt_secret(email_app_password)
+            row.updated_at = datetime.utcnow()
+        await self.session.flush()
+        return row
+
+    async def delete(self, user_id: int, portal: str) -> bool:
+        row = await self.get(user_id, portal)
+        if not row:
+            return False
+        await self.session.delete(row)
+        await self.session.flush()
+        return True
+
+    def to_portal_credential(self, row: PortalCredentialRow) -> PortalCredential:
+        return PortalCredential(
+            username=row.username,
+            password=decrypt_secret(row.password_enc) or "",
+            login_url=row.login_url,
+            email_app_password=decrypt_secret(row.email_app_password_enc),
+        )
+
+    async def list_status(self, user_id: int) -> list[dict[str, Any]]:
+        from job_automation.paths import SESSIONS_DIR
+
+        rows = {row.portal: row for row in await self.list_for_user(user_id)}
+        statuses: list[dict[str, Any]] = []
+        for portal in SUPPORTED_PORTALS:
+            row = rows.get(portal)
+            statuses.append(
+                {
+                    "portal": portal,
+                    "configured": bool(row),
+                    "username": row.username if row else None,
+                    "login_url": row.login_url if row else None,
+                    "has_password": bool(row and row.password_enc),
+                    "has_email_app_password": bool(row and row.email_app_password_enc),
+                    "has_session": (SESSIONS_DIR / f"{portal}.json").exists(),
+                }
+            )
+        return statuses

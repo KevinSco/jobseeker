@@ -46,6 +46,8 @@ class RawJob(BaseModel):
     work_type: str | None = None
     experience_level: str | None = None
     posted_text: str | None = None
+    posted_at: datetime | None = None
+    is_reposted: bool = False
     top_skills: list[str] = Field(default_factory=list)
     skills_required: list[str] = Field(default_factory=list)
     match_background_text: str | None = None
@@ -70,6 +72,8 @@ class JobDetail(BaseModel):
     work_type: str | None = None
     experience_level: str | None = None
     posted_text: str | None = None
+    posted_at: datetime | None = None
+    is_reposted: bool = False
     skills_required: list[str] = Field(default_factory=list)
     match_background_text: str | None = None
     portal_job_url: str | None = None
@@ -86,7 +90,9 @@ class NormalizedJob(BaseModel):
     company_url: str | None = None
     company_headline: str | None = None
     location: str | None = None
+    location_eligible: str | None = None  # Yes / No / Unknown (CT applicant)
     remote_policy: str | None = None
+    remote_eligible: str | None = None  # Yes / No / Unknown
     work_type: str | None = None
     commitment: str | None = None
     experience_level: str | None = None
@@ -97,8 +103,11 @@ class NormalizedJob(BaseModel):
     salary_min_hourly: float | None = None
     salary_max_hourly: float | None = None
     posted_text: str | None = None
+    posted_at: datetime | None = None
+    is_reposted: bool = False
     security_clearance_required: bool | None = None
     travel_required: bool | None = None
+    onsite_onboarding: bool | None = None
     security_related_company_or_role: bool | None = None
     role_excluded: bool | None = None
     role_match: bool | None = None

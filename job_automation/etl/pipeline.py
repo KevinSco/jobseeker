@@ -11,12 +11,16 @@ from job_automation.etl.parsers import (
     parse_excluded_role,
     parse_experience_level,
     parse_government_industry,
+    parse_location_eligible,
+    parse_onsite_onboarding,
+    parse_remote_eligible,
     parse_remote_policy,
+    parse_restricted_company_industry,
     parse_role_match,
-    parse_security_related,
     parse_skill_match,
     parse_travel,
 )
+from job_automation.etl.posted_parser import format_posted_relative, parse_posted_relative
 from job_automation.etl.salary_parser import parse_salary
 from job_automation.models.domain import Evidence, NormalizedJob, RawJob
 
@@ -39,7 +43,7 @@ def transform_raw_job(raw: RawJob, config: SearchConfig) -> NormalizedJob:
     ]
     # Remaining evidence (remote/travel/clearance/salary/security/commitment) must
     # use job head + match-background + job-post-body + Skills Required.
-    skills_required = raw.skills_required or raw.top_skills
+    skills_required = raw.top_skills or raw.skills_required
     skills_blob = ", ".join(skills_required) if skills_required else None
     evidence_corpus = "\n".join(
         filter(
@@ -47,19 +51,49 @@ def transform_raw_job(raw: RawJob, config: SearchConfig) -> NormalizedJob:
             [
                 *header_bits,
                 raw.match_background_text,
+                raw.company_headline,
                 description,
                 skills_blob,
             ],
         )
     )
 
+    applicant_location = getattr(config, "applicant_location", None) or "Connecticut"
     salary_source = raw.job_card_salary or _extract_salary_snippet(evidence_corpus)
     salary = parse_salary(salary_source)
-    remote = _remote_from_work_type(raw.work_type) or parse_remote_policy(evidence_corpus, config.keywords)
+
+    location_eligible = parse_location_eligible(evidence_corpus, applicant_location)
+    # Work-type shortcut only when it clearly implies remote; CT eligibility still from text.
+    work_remote = _remote_from_work_type(raw.work_type)
+    remote_eligible = parse_remote_eligible(
+        evidence_corpus,
+        config.keywords,
+        location_eligible=str(location_eligible.value) if location_eligible.value else None,
+    )
+    if work_remote and work_remote.value in {"fully_remote_us", "hybrid_possible_remote"}:
+        if remote_eligible.value == "Unknown" and "remote" in (raw.work_type or "").lower():
+            # Card says Remote but no US/CT detail → remote Yes, location may stay Unknown.
+            remote_eligible = ParseResult("Yes", raw.work_type, location_eligible.value != "Yes")
+
+    remote_policy = parse_remote_policy(evidence_corpus, config.keywords)
+    if work_remote and remote_policy.value in {None, "unclear", "remote_unclear"}:
+        if remote_eligible.value == "Yes" and location_eligible.value == "Yes":
+            remote_policy = ParseResult("fully_remote_us", work_remote.evidence_text, False)
+        elif remote_eligible.value == "Yes":
+            remote_policy = ParseResult("remote_unclear", work_remote.evidence_text, True)
+        else:
+            remote_policy = work_remote
+
     travel = parse_travel(evidence_corpus, config.keywords)
     clearance = parse_clearance(evidence_corpus, config.keywords)
-    security_related = parse_security_related(evidence_corpus, config.keywords)
+    company_industry = parse_restricted_company_industry(
+        evidence_corpus,
+        config.keywords,
+        industry=raw.industry,
+        company_headline=raw.company_headline,
+    )
     government = parse_government_industry(evidence_corpus, config.keywords)
+    onboarding = parse_onsite_onboarding(evidence_corpus, config.keywords)
     # Keep proven title-based role flags.
     role_match = parse_role_match(raw.job_card_title, config.target_roles)
     role_excluded = parse_excluded_role(raw.job_card_title, config.excluded_roles)
@@ -76,9 +110,29 @@ def transform_raw_job(raw: RawJob, config: SearchConfig) -> NormalizedJob:
     )
 
     evidence: list[Evidence] = []
-    _add_evidence(evidence, "remote_policy", remote.value, remote.evidence_text, source="job_head_and_body")
-    _add_evidence(evidence, "work_type", raw.work_type, raw.work_type, source="job_head")
-    _add_evidence(evidence, "travel_required", travel.value, travel.evidence_text, source="job_head_and_body")
+    _add_evidence(
+        evidence,
+        "location",
+        location_eligible.value,
+        location_eligible.evidence_text,
+        source="job_head_and_body",
+    )
+    _add_evidence(
+        evidence,
+        "remote",
+        remote_eligible.value,
+        remote_eligible.evidence_text,
+        source="job_head_and_body",
+    )
+    # Skip duplicated evidence fields: remote_policy, work_type, salary,
+    # security_related_company_or_role, role_excluded.
+    _add_evidence(
+        evidence,
+        "travel_required",
+        travel.value,
+        travel.evidence_text,
+        source="job_head_and_body",
+    )
     _add_evidence(
         evidence,
         "security_clearance_required",
@@ -86,13 +140,33 @@ def transform_raw_job(raw: RawJob, config: SearchConfig) -> NormalizedJob:
         clearance.evidence_text,
         source="job_head_and_body",
     )
-    _add_evidence(evidence, "salary", salary.salary_text, salary.evidence_text, source="job_head_and_body")
+    _add_evidence(
+        evidence,
+        "salary range",
+        salary.salary_text,
+        salary.evidence_text,
+        source="job_head_and_body",
+    )
     _add_evidence(
         evidence,
         "industry",
-        raw.industry or government.value,
+        raw.industry or ("government" if government.value else None),
         raw.industry or government.evidence_text,
         source="job_head",
+    )
+    _add_evidence(
+        evidence,
+        "company_industry_restricted",
+        company_industry.value,
+        company_industry.evidence_text,
+        source="job_head_and_body",
+    )
+    _add_evidence(
+        evidence,
+        "onsite_onboarding",
+        onboarding.value,
+        onboarding.evidence_text,
+        source="job_head_and_body",
     )
     _add_evidence(
         evidence,
@@ -102,12 +176,43 @@ def transform_raw_job(raw: RawJob, config: SearchConfig) -> NormalizedJob:
         source="job_head",
     )
     _add_evidence(evidence, "posted_text", raw.posted_text, raw.posted_text, source="job_head")
+    posted = parse_posted_relative(raw.posted_text)
+    if posted.posted_at is None and raw.posted_at:
+        posted.posted_at = raw.posted_at.replace(second=0, microsecond=0)
+    if raw.is_reposted:
+        posted.is_reposted = True
+    display_posted = (
+        format_posted_relative(posted.posted_at, is_reposted=posted.is_reposted)
+        if posted.posted_at
+        else normalize_text(raw.posted_text)
+    )
+    _add_evidence(
+        evidence,
+        "posted_at",
+        posted.posted_at.isoformat(timespec="minutes") if posted.posted_at else None,
+        display_posted,
+        source="job_head",
+    )
     _add_evidence(
         evidence,
         "company_headline",
         raw.company_headline,
         raw.company_headline,
         source="job_head",
+    )
+    _add_evidence(
+        evidence,
+        "requirements_summary",
+        raw.match_background_text or raw.company_headline,
+        raw.match_background_text or raw.company_headline,
+        source="job_card",
+    )
+    _add_evidence(
+        evidence,
+        "match_background",
+        raw.match_background_text or raw.company_headline,
+        raw.match_background_text or raw.company_headline,
+        source="job_card",
     )
     _add_evidence(evidence, "role_match", role_match.value, role_match.evidence_text, source="job_title")
     _add_evidence(
@@ -126,27 +231,6 @@ def transform_raw_job(raw: RawJob, config: SearchConfig) -> NormalizedJob:
     )
     _add_evidence(
         evidence,
-        "match_background",
-        bool(raw.match_background_text) if raw.match_background_text else None,
-        raw.match_background_text,
-        source="match_background",
-    )
-    _add_evidence(
-        evidence,
-        "security_related_company_or_role",
-        security_related.value,
-        security_related.evidence_text,
-        source="job_head_and_body",
-    )
-    _add_evidence(
-        evidence,
-        "role_excluded",
-        role_excluded.value,
-        role_excluded.evidence_text,
-        source="job_title",
-    )
-    _add_evidence(
-        evidence,
         "commitment",
         commitment.value,
         commitment.evidence_text,
@@ -161,7 +245,9 @@ def transform_raw_job(raw: RawJob, config: SearchConfig) -> NormalizedJob:
         company_url=normalize_text(raw.company_url),
         company_headline=normalize_text(raw.company_headline),
         location=normalize_text(raw.job_card_location),
-        remote_policy=str(remote.value) if remote.value is not None else None,
+        location_eligible=str(location_eligible.value) if location_eligible.value else None,
+        remote_policy=str(remote_policy.value) if remote_policy.value is not None else None,
+        remote_eligible=str(remote_eligible.value) if remote_eligible.value else None,
         work_type=normalize_text(raw.work_type),
         commitment=str(commitment.value) if commitment.value else None,
         experience_level=str(experience.value) if experience.value else None,
@@ -171,10 +257,13 @@ def transform_raw_job(raw: RawJob, config: SearchConfig) -> NormalizedJob:
         salary_max_annual=salary.max_annual,
         salary_min_hourly=salary.min_hourly,
         salary_max_hourly=salary.max_hourly,
-        posted_text=normalize_text(raw.posted_text),
+        posted_text=display_posted or normalize_text(raw.posted_text),
+        posted_at=posted.posted_at,
+        is_reposted=bool(posted.is_reposted),
         security_clearance_required=clearance.value if isinstance(clearance.value, bool) else None,
         travel_required=travel.value if isinstance(travel.value, bool) else None,
-        security_related_company_or_role=bool(security_related.value),
+        onsite_onboarding=onboarding.value if isinstance(onboarding.value, bool) else False,
+        security_related_company_or_role=bool(company_industry.value),
         role_excluded=bool(role_excluded.value),
         role_match=bool(role_match.value),
         skill_match=skill_match.value if isinstance(skill_match.value, bool) else None,
@@ -232,10 +321,29 @@ def _add_evidence(
 def _extract_salary_snippet(text: str) -> str | None:
     import re
 
-    match = re.search(
-        r"(?:\$[\d,]+(?:\.\d+)?(?:\s*-\s*\$?[\d,]+(?:\.\d+)?)?\s*K?(?:\s*(?:/hr|per hour|annually|/year))?|"
+    # Prefer explicit compensation cues; skip funding/valuation ($781M, $11B).
+    for match in re.finditer(
+        r"(?:(?:base\s+)?(?:salary|pay|compensation)\s*(?:range)?\s*:?\s*)?"
+        r"(?:\$[\d,]+(?:\.\d+)?(?:\s*-\s*\$?[\d,]+(?:\.\d+)?)?\s*[kK]?(?:\s*(?:/hr|per hour|annually|/year))?|"
         r"\d{2,3}K(?:\s*-\s*\d{2,3}K)?(?:\s*Annually)?)",
         text,
         re.I,
-    )
-    return match.group(0) if match else None
+    ):
+        snippet = match.group(0)
+        start = match.start()
+        window = text[max(0, start - 40) : match.end() + 20]
+        if re.search(r"raised|funding|valuation|\$\d+(?:\.\d+)?\s*[mb]\b", window, re.I):
+            continue
+        if re.search(r"\$\d+(?:\.\d+)?\s*[mb]\b", snippet, re.I):
+            continue
+        # Reject tiny dollar amounts without salary cue (e.g. $781 from $781M truncated).
+        tiny = re.fullmatch(
+            r"\$(\d{1,3})(?:\.\d+)?",
+            snippet.replace(",", "").strip(),
+            re.I,
+        )
+        if tiny and float(tiny.group(1)) < 1000:
+            if not re.search(r"salary|pay|compensation|/hr|per hour|annually|/year", window, re.I):
+                continue
+        return snippet
+    return None

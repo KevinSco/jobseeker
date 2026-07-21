@@ -3,13 +3,41 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>JobSeek Auto</title>
-  <link rel="stylesheet" href="/static/styles.css">
+  <title>Jobseek</title>
+  <link rel="stylesheet" href="/static/styles.css?v=posted-6">
+  <link rel="icon" href="/static/img/jobseek-logo.jpg" type="image/jpeg">
 </head>
 <body>
   <div class="app">
-    <aside class="sidebar">
-      <div class="logo">JS</div>
+    <div id="nav-drawer-backdrop" class="drawer-backdrop" hidden></div>
+    <div id="jobs-filters-backdrop" class="drawer-backdrop" hidden></div>
+
+    <header class="navbar">
+      <div class="navbar-brand">
+        <img class="logo" src="/static/img/jobseek-logo.jpg" alt="Jobseek" width="40" height="40">
+        <div class="brand">Jobseek</div>
+      </div>
+      <div class="topbar-actions">
+        <button id="find-jobs-btn" class="primary-btn" type="button">Find Jobs</button>
+        <button id="stop-jobs-btn" class="danger-btn topbar-stop-btn" type="button" hidden>Stop</button>
+        <button id="clear-jobs-btn" class="secondary-btn" type="button">Clear Jobs</button>
+        <span id="run-status" class="muted">Ready</span>
+        <span id="kasm-links" class="kasm-links" hidden></span>
+        <div id="auth-slot" class="auth-slot">
+          <button id="signin-btn" class="secondary-btn" type="button">Sign in</button>
+        </div>
+        <button type="button" id="open-nav-menu" class="icon-menu-btn" aria-label="Open menu" aria-expanded="false">
+          <span class="icon-menu-bars" aria-hidden="true"></span>
+        </button>
+      </div>
+    </header>
+
+    <div class="app-body">
+    <aside class="sidebar" id="app-sidebar">
+      <div class="sidebar-drawer-top">
+        <span class="sidebar-drawer-label">Menu</span>
+        <button type="button" id="close-nav-menu" class="icon-close-btn drawer-close-btn" aria-label="Close menu">×</button>
+      </div>
       <nav>
         <button class="nav-item" data-view="home">Home</button>
         <button class="nav-item active" data-view="jobs">Jobs</button>
@@ -19,20 +47,6 @@
     </aside>
 
     <main class="content">
-      <header class="topbar">
-        <div class="brand">JobSeek Auto</div>
-        <div class="topbar-actions">
-          <button id="find-jobs-btn" class="primary-btn" type="button">Find Jobs</button>
-          <button id="stop-jobs-btn" class="danger-btn topbar-stop-btn" type="button" hidden>Stop</button>
-          <button id="clear-jobs-btn" class="secondary-btn" type="button">Clear Jobs</button>
-          <span id="run-status" class="muted">Ready</span>
-          <span id="kasm-links" class="kasm-links" hidden></span>
-          <div id="auth-slot" class="auth-slot">
-            <button id="signin-btn" class="secondary-btn" type="button">Sign in</button>
-          </div>
-        </div>
-      </header>
-
       <section id="home-view" class="view-section">
         <section class="search-section">
           <div class="search-label">
@@ -56,7 +70,11 @@
 
       <section id="jobs-view" class="view-section hidden">
         <div class="jobs-layout">
-          <aside class="jobs-sidebar">
+          <aside class="jobs-sidebar" id="jobs-sidebar">
+            <div class="jobs-sidebar-header">
+              <h3>Search Filters</h3>
+              <button type="button" id="close-jobs-filters" class="icon-close-btn drawer-close-btn" aria-label="Close filters">×</button>
+            </div>
             <div class="entity-toggle">
               <button type="button" class="toggle-btn active" data-entity="position">Position</button>
               <button type="button" class="toggle-btn" data-entity="companies">Companies</button>
@@ -87,6 +105,8 @@
                 <input id="jobs-search-input" type="search" placeholder="Search title, company, location..." autocomplete="off">
                 <button type="submit">Search</button>
               </form>
+
+              <button type="button" id="edit-search-criteria" class="edit-criteria-btn">Edit Search Criteria</button>
             </div>
 
             <div class="jobs-content">
@@ -96,6 +116,12 @@
                     <span><strong id="jobs-total-count">0</strong> jobs</span>
                     <span class="jobs-results-sep">·</span>
                     <span><strong id="jobs-company-count">0</strong> companies</span>
+                  </div>
+                  <div id="jobs-select-bar" class="jobs-select-bar hidden">
+                    <button type="button" id="select-all-jobs" class="secondary-btn">Select All</button>
+                    <span id="jobs-select-count" class="muted">0 selected</span>
+                    <button type="button" id="cancel-jobs-select" class="secondary-btn">Cancel</button>
+                    <button type="button" id="delete-selected-jobs" class="danger-btn">Delete</button>
                   </div>
                   <div class="jobs-sort" id="jobs-sort-wrap">
                     <span class="jobs-sort-label">Sort by:</span>
@@ -115,12 +141,6 @@
                     <input type="hidden" id="jobs-sort" value="relevance">
                   </div>
                 </div>
-                <div id="jobs-select-bar" class="jobs-select-bar hidden">
-                  <button type="button" id="select-all-jobs" class="secondary-btn">Select All</button>
-                  <span id="jobs-select-count" class="muted">0 selected</span>
-                  <button type="button" id="cancel-jobs-select" class="secondary-btn">Cancel</button>
-                  <button type="button" id="delete-selected-jobs" class="danger-btn">Delete</button>
-                </div>
                 <div id="jobs-list" class="jobs-grid"></div>
                 <div id="pagination" class="pagination"></div>
               </div>
@@ -131,10 +151,6 @@
         <aside id="job-detail-drawer" class="job-detail-drawer hidden" aria-hidden="true">
           <div class="job-detail-drawer-backdrop" id="job-detail-backdrop"></div>
           <div class="job-detail-drawer-panel panel">
-            <div class="jobs-panel-header">
-              <h2>Job Detail</h2>
-              <button type="button" id="close-job-detail" class="secondary-btn" aria-label="Close detail">Close</button>
-            </div>
             <div id="job-detail" class="job-detail empty">Select a job to view evidence and links.</div>
           </div>
         </aside>
@@ -175,25 +191,46 @@
         <div class="panel settings-panel">
           <h2>Portal Login Credentials</h2>
           <p class="muted settings-note">
-            Credentials are saved in your browser (localStorage) on this device. When you click
-            <strong>Find Jobs</strong>, they are sent to the automation runner to log in and search.
+            Credentials are saved on your JobSeek account (encrypted). Sign in once, save portal
+            logins in Settings, and they are reused for Find Jobs on this and other browsers.
           </p>
           <div id="portal-credentials" class="credentials-grid"></div>
         </div>
       </section>
     </main>
+    </div>
   </div>
 
   <div id="find-jobs-modal" class="modal hidden">
     <div class="modal-content">
       <h2>Find Jobs</h2>
-      <p class="muted">Select portals to search. Saved credentials from Settings are used to log in.</p>
+      <p class="muted">Select portals to search. Credentials saved on your JobSeek account are used to log in.</p>
       <p id="find-jobs-hint" class="find-jobs-hint hidden"></p>
       <div id="find-portals" class="portal-checkboxes"></div>
       <div class="modal-actions">
         <button type="button" id="go-settings-btn" class="secondary-btn">Open Settings</button>
         <button type="button" id="cancel-find-jobs" class="secondary-btn">Cancel</button>
         <button type="button" id="confirm-find-jobs" class="primary-btn">Start Search</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="company-jobs-modal" class="modal company-jobs-modal hidden" aria-hidden="true">
+    <div class="company-jobs-dialog" role="dialog" aria-modal="true" aria-labelledby="company-jobs-title">
+      <div class="company-jobs-header">
+        <div class="company-jobs-brand">
+          <div id="company-jobs-avatar" class="company-jobs-avatar" aria-hidden="true">?</div>
+          <div>
+            <h2 id="company-jobs-title">Company</h2>
+            <p id="company-jobs-count" class="muted">0 jobs</p>
+          </div>
+        </div>
+        <button type="button" id="close-company-jobs" class="icon-close-btn" aria-label="Close">×</button>
+      </div>
+      <div id="company-jobs-grid" class="company-jobs-grid"></div>
+      <div class="company-jobs-footer">
+        <p id="company-jobs-footnote" class="muted">0 jobs · the company may have more openings</p>
+        <a id="company-jobs-see-all" class="company-jobs-see-all" href="#" target="_blank" rel="noopener noreferrer">See all jobs</a>
       </div>
     </div>
   </div>
@@ -240,7 +277,7 @@
     </div>
   </div>
 
-  <script src="/static/credentials-store.js"></script>
-  <script src="/static/app.js"></script>
+  <script src="/static/credentials-store.js?v=posted-6"></script>
+  <script src="/static/app.js?v=posted-6"></script>
 </body>
 </html>

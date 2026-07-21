@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -23,7 +23,9 @@ class JobRow(Base):
     company_url: Mapped[str | None] = mapped_column(Text)
     company_headline: Mapped[str | None] = mapped_column(Text)
     location: Mapped[str | None] = mapped_column(String(512))
+    location_eligible: Mapped[str | None] = mapped_column(String(32))
     remote_policy: Mapped[str | None] = mapped_column(String(128))
+    remote_eligible: Mapped[str | None] = mapped_column(String(32))
     work_type: Mapped[str | None] = mapped_column(String(128))
     commitment: Mapped[str | None] = mapped_column(String(64))
     experience_level: Mapped[str | None] = mapped_column(String(64))
@@ -34,8 +36,11 @@ class JobRow(Base):
     salary_min_hourly: Mapped[float | None] = mapped_column(Float)
     salary_max_hourly: Mapped[float | None] = mapped_column(Float)
     posted_text: Mapped[str | None] = mapped_column(String(128))
+    posted_at: Mapped[datetime | None] = mapped_column(DateTime)
+    is_reposted: Mapped[bool] = mapped_column(Boolean, default=False)
     security_clearance_required: Mapped[bool | None] = mapped_column(Boolean)
     travel_required: Mapped[bool | None] = mapped_column(Boolean)
+    onsite_onboarding: Mapped[bool | None] = mapped_column(Boolean)
     security_related_company_or_role: Mapped[bool | None] = mapped_column(Boolean)
     role_excluded: Mapped[bool | None] = mapped_column(Boolean)
     job_url: Mapped[str | None] = mapped_column(Text)
@@ -104,3 +109,28 @@ class UserRow(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(256))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    portal_credentials: Mapped[list[PortalCredentialRow]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
+
+class PortalCredentialRow(Base):
+    """Per-user encrypted job-portal login credentials."""
+
+    __tablename__ = "portal_credentials"
+    __table_args__ = (UniqueConstraint("user_id", "portal", name="uq_user_portal_credential"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    portal: Mapped[str] = mapped_column(String(64))
+    username: Mapped[str] = mapped_column(String(320))
+    password_enc: Mapped[str] = mapped_column(Text)
+    login_url: Mapped[str | None] = mapped_column(Text)
+    email_app_password_enc: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    user: Mapped[UserRow] = relationship(back_populates="portal_credentials")

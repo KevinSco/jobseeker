@@ -23,9 +23,12 @@ class KeywordsConfig(BaseModel):
     clearance: list[str] = Field(default_factory=list)
     security_related: list[str] = Field(default_factory=list)
     government_industry: list[str] = Field(default_factory=list)
+    restricted_company_industry: list[str] = Field(default_factory=list)
     onsite: list[str] = Field(default_factory=list)
     hybrid: list[str] = Field(default_factory=list)
     fully_remote: list[str] = Field(default_factory=list)
+    onsite_onboarding: list[str] = Field(default_factory=list)
+    remote_onboarding: list[str] = Field(default_factory=list)
 
 
 class SearchConfig(BaseModel):
@@ -38,6 +41,7 @@ class SearchConfig(BaseModel):
     commitment_types: list[str] = Field(default_factory=list)
     banned_industry_terms: list[str] = Field(default_factory=list)
     location: str = "United States"
+    applicant_location: str = "Connecticut"
     salary: SalaryConfig = Field(default_factory=SalaryConfig)
     keywords: KeywordsConfig = Field(default_factory=KeywordsConfig)
     portals: list[str] = Field(

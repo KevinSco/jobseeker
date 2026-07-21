@@ -55,7 +55,7 @@ class Orchestrator:
         try:
             existing_jobs = await self._load_existing_jobs()
             dedupe_engine = DeduplicationEngine(existing_jobs)
-            rule_engine = RuleEngine(self.config)
+            rule_engine = RuleEngine(self.config, dedupe_engine=dedupe_engine)
             await self._run_portal_batch(portals, dedupe_engine, rule_engine, summary)
         finally:
             await self.browser_manager.stop()
@@ -80,7 +80,7 @@ class Orchestrator:
 
         existing_jobs = await self._load_existing_jobs()
         dedupe_engine = DeduplicationEngine(existing_jobs)
-        rule_engine = RuleEngine(self.config)
+        rule_engine = RuleEngine(self.config, dedupe_engine=dedupe_engine)
 
         try:
             for offset in range(0, len(portals), batch_size):

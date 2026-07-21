@@ -101,6 +101,8 @@ class BasePortalWorker(ABC):
                         work_type=detail.work_type or card.work_type,
                         experience_level=detail.experience_level or card.experience_level,
                         posted_text=detail.posted_text or card.posted_text,
+                        posted_at=detail.posted_at or card.posted_at,
+                        is_reposted=bool(detail.is_reposted or card.is_reposted),
                         top_skills=card.top_skills,
                         raw_html=detail.raw_html,
                         description_text=detail.description_text,
