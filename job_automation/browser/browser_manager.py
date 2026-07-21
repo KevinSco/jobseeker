@@ -68,6 +68,8 @@ class BrowserManager:
                         "and JobSeek can reach the container IP (same Docker host)."
                     ) from exc
                 self._browsers[portal] = browser
+                # Collapse leftover empty windows from earlier runs into one shared Chrome.
+                await self._collapse_kasm_windows(portal, browser)
             return
 
         launch_args = [
@@ -95,48 +97,144 @@ class BrowserManager:
             self._browser = await self._playwright.chromium.launch(**launch_kwargs)
 
     async def stop(self) -> None:
-        for context in self._contexts.values():
-            try:
-                await context.close()
-            except Exception:
-                pass
-        self._contexts.clear()
+        if self.uses_kasm:
+            # Shared Kasm Chrome must stay alive for all Watch viewers.
+            # Only disconnect CDP — never close the default remote context/window.
+            self._contexts.clear()
+            for portal, browser in list(self._browsers.items()):
+                try:
+                    await browser.close()
+                except Exception as exc:
+                    log_event(
+                        logger,
+                        f"CDP disconnect error: {exc}",
+                        portal=portal,
+                        action="kasm_cdp_disconnect",
+                        level=30,
+                    )
+            self._browsers.clear()
+        else:
+            for context in self._contexts.values():
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+            self._contexts.clear()
 
-        for portal, browser in list(self._browsers.items()):
-            try:
-                await browser.close()
-            except Exception as exc:
-                log_event(
-                    logger,
-                    f"CDP disconnect error: {exc}",
-                    portal=portal,
-                    action="kasm_cdp_disconnect",
-                    level=30,
-                )
-        self._browsers.clear()
-
-        if self._browser:
-            try:
-                await self._browser.close()
-            except Exception:
-                pass
-            self._browser = None
+            if self._browser:
+                try:
+                    await self._browser.close()
+                except Exception:
+                    pass
+                self._browser = None
 
         if self._playwright:
             await self._playwright.stop()
             self._playwright = None
 
+    async def _collapse_kasm_windows(self, portal: str, browser: Browser) -> None:
+        """Keep a single Chrome window/context; close empty extras from prior runs."""
+        contexts = list(browser.contexts)
+        if not contexts:
+            return
+        primary = contexts[0]
+        for extra in contexts[1:]:
+            try:
+                await extra.close()
+            except Exception:
+                pass
+        self._contexts[portal] = primary
+        pages = list(primary.pages)
+        if not pages:
+            return
+        # Prefer a page that already has content; otherwise keep the first tab.
+        keep = pages[0]
+        for candidate in pages:
+            url = (candidate.url or "").strip().lower()
+            if url and url not in {"about:blank", "chrome://newtab/", "chrome://new-tab-page/"}:
+                keep = candidate
+                break
+        for page in pages:
+            if page is keep:
+                continue
+            try:
+                await page.close()
+            except Exception:
+                pass
+        await self._prepare_kasm_page(keep)
+        log_event(
+            logger,
+            "Using one shared Kasm Chrome window (flexible size)",
+            portal=portal,
+            action="kasm_reuse_context",
+        )
+
+    async def _prepare_kasm_page(self, page: Page) -> Page:
+        """Drop fixed viewport emulation and maximize so Watch resize follows the window."""
+        try:
+            session = await page.context.new_cdp_session(page)
+            try:
+                await session.send("Emulation.clearDeviceMetricsOverride")
+            except Exception:
+                pass
+            try:
+                win = await session.send("Browser.getWindowForTarget")
+                window_id = win.get("windowId")
+                if window_id is not None:
+                    await session.send(
+                        "Browser.setWindowBounds",
+                        {"windowId": window_id, "bounds": {"windowState": "maximized"}},
+                    )
+            except Exception:
+                pass
+            try:
+                await session.detach()
+            except Exception:
+                pass
+        except Exception as exc:
+            log_event(
+                logger,
+                f"Kasm window prepare skipped: {exc}",
+                action="kasm_prepare_window",
+                level=30,
+            )
+        try:
+            await page.bring_to_front()
+        except Exception:
+            pass
+        return page
+
     async def get_context(self, portal: str, storage_state: str | None = None) -> BrowserContext:
         if portal not in self._contexts:
             browser = self._browser_for(portal)
-            kwargs: dict = {"viewport": {"width": 1440, "height": 900}}
-            if storage_state:
-                kwargs["storage_state"] = storage_state
-            self._contexts[portal] = await browser.new_context(**kwargs)
+            if self.uses_kasm:
+                existing = list(browser.contexts)
+                if existing:
+                    await self._collapse_kasm_windows(portal, browser)
+                else:
+                    # viewport=None → page size follows the real Chrome window (flexible).
+                    self._contexts[portal] = await browser.new_context(viewport=None)
+            else:
+                kwargs: dict = {"viewport": {"width": 1440, "height": 900}}
+                if storage_state:
+                    kwargs["storage_state"] = storage_state
+                self._contexts[portal] = await browser.new_context(**kwargs)
         return self._contexts[portal]
 
     async def new_page(self, portal: str, storage_state: str | None = None) -> Page:
         context = await self.get_context(portal, storage_state)
+        if self.uses_kasm:
+            pages = list(context.pages)
+            if pages:
+                page = pages[0]
+                for extra in pages[1:]:
+                    try:
+                        await extra.close()
+                    except Exception:
+                        pass
+                return await self._prepare_kasm_page(page)
+            page = await context.new_page()
+            return await self._prepare_kasm_page(page)
         return await context.new_page()
 
     @asynccontextmanager

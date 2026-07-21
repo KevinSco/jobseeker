@@ -450,6 +450,7 @@ body {
 }
 
 .job-location {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 5px;
@@ -461,9 +462,52 @@ body {
   width: 10px;
   height: 10px;
   border-radius: 50% 50% 50% 0;
-  border: 1.5px solid var(--muted);
+  border: 1.5px solid #6ea8ff;
   transform: rotate(-45deg);
   flex-shrink: 0;
+}
+
+.job-location-text {
+  color: #b7c3d9;
+}
+
+.job-location-multi .job-location-trigger {
+  color: #8eb6ff;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: default;
+}
+
+.job-location-popover {
+  display: none;
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  z-index: 30;
+  min-width: 220px;
+  max-width: 320px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #1a2744;
+  border: 1px solid #2c3d63;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+}
+
+.job-location-multi:hover .job-location-popover,
+.job-location-multi:focus-within .job-location-popover {
+  display: block;
+}
+
+.job-location-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 14px;
+  color: #e8eefc;
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .job-tags {
@@ -511,6 +555,12 @@ body {
 .job-tag.portal {
   color: #9aa8ff;
   border-color: rgba(108, 99, 255, 0.35);
+}
+
+.job-tag.easy-apply {
+  border-color: rgba(241, 196, 15, 0.55);
+  color: #f5d76e;
+  background: rgba(241, 196, 15, 0.1);
 }
 
 .job-company {
@@ -574,7 +624,7 @@ body {
   font-size: 11px;
   line-height: 1.35;
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -583,10 +633,24 @@ body {
   border-color: rgba(15, 83, 135, 0.45);
   color: #8ec5e8;
   background: rgba(15, 83, 135, 0.12);
+  font-size: 11px;
+  padding: 1px 7px;
 }
 
 .job-skills {
-  margin-top: 2px;
+  margin-top: 4px;
+  gap: 4px;
+}
+
+.job-skills-label {
+  display: block;
+  width: 100%;
+  margin: 0 0 2px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #7d8698;
 }
 
 .job-snippet {

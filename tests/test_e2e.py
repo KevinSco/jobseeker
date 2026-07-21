@@ -209,6 +209,32 @@ def test_health_api(seeded_client: TestClient):
     assert response.json()["status"] == "ok"
 
 
+def test_hide_job_excluded_from_list(seeded_client: TestClient):
+    listing = seeded_client.get("/api/jobs?page=1&page_size=50&show_hidden=true")
+    assert listing.status_code == 200
+    jobs = listing.json()["jobs"]
+    assert jobs, "expected seeded jobs"
+    job_id = jobs[0]["id"]
+
+    patched = seeded_client.patch(f"/api/jobs/{job_id}", json={"status": "hidden"})
+    assert patched.status_code == 200
+    assert patched.json()["status"] == "hidden"
+
+    after = seeded_client.get("/api/jobs?page=1&page_size=200&show_hidden=true")
+    assert after.status_code == 200
+    ids = [job["id"] for job in after.json()["jobs"]]
+    assert job_id not in ids
+    assert all(str(job.get("status") or "").lower() != "hidden" for job in after.json()["jobs"])
+
+    # Rejected/eligible tabs must also keep user-hidden jobs out.
+    for decision in ("eligible", "needs_review", "rejected"):
+        filtered = seeded_client.get(
+            f"/api/jobs?page=1&page_size=200&decision={decision}&show_hidden=true"
+        )
+        assert filtered.status_code == 200
+        assert job_id not in [job["id"] for job in filtered.json()["jobs"]]
+
+
 def test_delete_session_api(seeded_client: TestClient, tmp_path, monkeypatch):
     from job_automation import paths
 

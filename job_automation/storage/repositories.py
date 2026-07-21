@@ -35,6 +35,25 @@ def _evidence_from_json(raw: str | None) -> list[Evidence]:
     return [Evidence.model_validate(item) for item in json.loads(raw)]
 
 
+def _skills_to_json(skills: list[str] | None) -> str | None:
+    cleaned = [str(s).strip() for s in (skills or []) if str(s).strip()]
+    if not cleaned:
+        return None
+    return json.dumps(cleaned, ensure_ascii=False)
+
+
+def _skills_from_json(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return [part.strip() for part in str(raw).split(",") if part.strip()]
+    if isinstance(value, list):
+        return [str(part).strip() for part in value if str(part).strip()]
+    return []
+
+
 def job_row_to_normalized(row: JobRow) -> NormalizedJob:
     return NormalizedJob(
         source_portal=row.source_portal or "",
@@ -43,6 +62,8 @@ def job_row_to_normalized(row: JobRow) -> NormalizedJob:
         company=row.company,
         company_url=row.company_url,
         company_headline=row.company_headline,
+        requirements_summary=getattr(row, "requirements_summary", None),
+        top_skills=_skills_from_json(getattr(row, "top_skills_json", None)),
         location=row.location,
         location_eligible=getattr(row, "location_eligible", None),
         remote_policy=row.remote_policy,
@@ -129,9 +150,11 @@ class JobRepository:
         if existing:
             row = existing
             row.updated_at = datetime.utcnow()
+            prior_status = (existing.status or "").strip().lower()
         else:
             row = JobRow()
             self.session.add(row)
+            prior_status = ""
 
         row.source_portal = job.source_portal
         row.source_job_id = job.source_job_id
@@ -139,6 +162,8 @@ class JobRepository:
         row.company = job.company
         row.company_url = job.company_url
         row.company_headline = job.company_headline
+        row.requirements_summary = job.requirements_summary
+        row.top_skills_json = _skills_to_json(job.top_skills)
         row.location = job.location
         row.location_eligible = job.location_eligible
         row.remote_policy = job.remote_policy
@@ -171,7 +196,11 @@ class JobRepository:
         row.decision = job.decision.value if job.decision else None
         row.decision_reason = job.decision_reason
         row.evidence_json = _evidence_to_json(job.evidence)
-        row.status = job.status
+        # Never un-hide (or clear saved/applied) when the bot re-scrapes the same job.
+        if prior_status in {"hidden", "saved", "applied"}:
+            row.status = prior_status
+        else:
+            row.status = job.status
         row.manual_note = job.manual_note
 
         await self.session.flush()
@@ -227,8 +256,10 @@ class JobRepository:
         page_size: int = 20,
     ) -> tuple[list[JobRow], int, int]:
         stmt: Select[tuple[JobRow]] = select(JobRow)
-        # User-hidden jobs stay out of the browse grid.
-        stmt = stmt.where(or_(JobRow.status.is_(None), JobRow.status != "hidden"))
+        # User-hidden jobs must never appear in the browse grid.
+        # show_hidden only controls decision filters (rejected vs eligible), not status=hidden.
+        status_norm = func.lower(func.trim(func.coalesce(JobRow.status, "new")))
+        stmt = stmt.where(status_norm != "hidden")
         if decision:
             stmt = stmt.where(JobRow.decision.in_(decision))
         elif not show_hidden:

@@ -186,6 +186,22 @@ class Orchestrator:
                     normalized.remote_policy = "hybrid_required"
             if raw.work_type and not normalized.work_type:
                 normalized.work_type = raw.work_type
+            # Never reintroduce a job the user already hid (even if identity hash drifted).
+            if dedupe_engine.is_user_hidden(raw.source_job_id, raw.portal_job_url or raw.apply_url):
+                log_event(
+                    logger,
+                    "User-hidden job — skip save",
+                    portal=portal,
+                    job_id=raw.source_job_id or "-",
+                    action="skip_hidden",
+                )
+                update_search_progress(
+                    found=stats["found"],
+                    saved=stats["saved"],
+                    last_job_title=normalized.title or raw.job_card_title,
+                    last_decision="hidden",
+                )
+                return
             normalized = dedupe_engine.mark_duplicates(normalized)
             # Duplicate job-filter rule: do not save / continue processing duplicates.
             if normalized.is_duplicate:

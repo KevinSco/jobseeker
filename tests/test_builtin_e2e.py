@@ -49,11 +49,13 @@ DETAIL_EASY_APPLY = """
   <a href="/company/okco">OkCo</a>
   <div class="job-location">United States</div>
   <div class="job-salary">$140,000 Annually</div>
+  <span class="badge">Easy Apply</span>
   <div id="job-post-body-9990001" class="fs-md fw-regular mb-md html-parsed-content">
     Fully remote Python backend engineer in the United States. Full Time Mid Level.
     No travel. No clearance.
   </div>
-  <a id="applyButton" href="/apply/job/999">Easy Apply</a>
+  <div class="job-post-sticky-bar-btn">EASY APPLY</div>
+  <div class="job-post-sticky-bar-btn">SAVE</div>
 </body></html>
 """
 
@@ -191,7 +193,8 @@ async def test_e2e_easy_apply_link_needs_review_after_etl():
         job_card_location="United States",
         job_card_salary="$140,000 Annually",
         portal_job_url="https://builtin.com/job/python-easy",
-        apply_url="https://builtin.com/apply/job/999",
+        apply_url=None,
+        is_easy_apply=True,
         description_text=(
             "Fully remote within the United States. Full Time Mid Level software engineer "
             "using Python. Travel not required. Clearance not required."
@@ -216,6 +219,8 @@ async def test_e2e_easy_apply_link_needs_review_after_etl():
     decided = RuleEngine(config).decide(normalized)
     assert decided.decision == Decision.NEEDS_REVIEW
     assert decided.decision_reason == "easy apply"
+    assert decided.apply_url is None
+    assert decided.is_easy_apply is True
 
 
 @pytest.mark.asyncio

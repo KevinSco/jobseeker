@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from job_automation.config.loader import SearchConfig
-from job_automation.etl.cleaner import clean_html, normalize_company, normalize_text
+from job_automation.etl.cleaner import clean_html, normalize_company, normalize_job_location, normalize_text
 from job_automation.etl.parsers import (
     ParseResult,
     parse_clearance,
@@ -23,6 +23,15 @@ from job_automation.etl.parsers import (
 from job_automation.etl.posted_parser import format_posted_relative, parse_posted_relative
 from job_automation.etl.salary_parser import parse_salary
 from job_automation.models.domain import Evidence, NormalizedJob, RawJob
+
+
+def _is_builtin_easy_apply_url(apply_url: str | None) -> bool:
+    if not apply_url:
+        return False
+    lowered = str(apply_url).strip().lower()
+    if "/apply/job/" in lowered:
+        return True
+    return "builtin.com" in lowered and "/apply/" in lowered
 
 
 def transform_raw_job(raw: RawJob, config: SearchConfig) -> NormalizedJob:
@@ -193,6 +202,10 @@ def transform_raw_job(raw: RawJob, config: SearchConfig) -> NormalizedJob:
         display_posted,
         source="job_head",
     )
+    requirements_summary = normalize_text(raw.match_background_text)
+    top_skills = [normalize_text(s) or s for s in (skills_required or []) if s]
+    top_skills = [s for s in top_skills if s]
+
     _add_evidence(
         evidence,
         "company_headline",
@@ -203,15 +216,22 @@ def transform_raw_job(raw: RawJob, config: SearchConfig) -> NormalizedJob:
     _add_evidence(
         evidence,
         "requirements_summary",
-        raw.match_background_text or raw.company_headline,
-        raw.match_background_text or raw.company_headline,
+        requirements_summary,
+        requirements_summary,
         source="job_card",
     )
     _add_evidence(
         evidence,
         "match_background",
-        raw.match_background_text or raw.company_headline,
-        raw.match_background_text or raw.company_headline,
+        requirements_summary,
+        requirements_summary,
+        source="job_card",
+    )
+    _add_evidence(
+        evidence,
+        "top_skills",
+        top_skills or None,
+        ", ".join(top_skills) if top_skills else None,
         source="job_card",
     )
     _add_evidence(evidence, "role_match", role_match.value, role_match.evidence_text, source="job_title")
@@ -244,7 +264,9 @@ def transform_raw_job(raw: RawJob, config: SearchConfig) -> NormalizedJob:
         company=normalize_company(raw.job_card_company),
         company_url=normalize_text(raw.company_url),
         company_headline=normalize_text(raw.company_headline),
-        location=normalize_text(raw.job_card_location),
+        requirements_summary=requirements_summary,
+        top_skills=top_skills,
+        location=normalize_job_location(raw.job_card_location),
         location_eligible=str(location_eligible.value) if location_eligible.value else None,
         remote_policy=str(remote_policy.value) if remote_policy.value is not None else None,
         remote_eligible=str(remote_eligible.value) if remote_eligible.value else None,
@@ -268,7 +290,8 @@ def transform_raw_job(raw: RawJob, config: SearchConfig) -> NormalizedJob:
         role_match=bool(role_match.value),
         skill_match=skill_match.value if isinstance(skill_match.value, bool) else None,
         job_url=raw.portal_job_url or raw.job_card_url,
-        apply_url=raw.apply_url,
+        apply_url=None if (raw.is_easy_apply or _is_builtin_easy_apply_url(raw.apply_url)) else raw.apply_url,
+        is_easy_apply=bool(raw.is_easy_apply or _is_builtin_easy_apply_url(raw.apply_url)),
         description_text=description or None,
         raw_html=raw.raw_html,
         evidence=evidence,
